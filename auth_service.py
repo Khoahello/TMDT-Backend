@@ -160,16 +160,16 @@ def send_otp_email(receiver_email, otp):
     </html>
     """
     message.attach(MIMEText(html_content, "html", "utf-8"))
-
+    
     try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
+        # Dùng SMTP_SSL phóng thẳng vào cổng 465, bỏ qua hoàn toàn lệnh server.starttls()
+        server = smtplib.SMTP_SSL("smtp.gmail.com", 465) 
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, receiver_email, message.as_string())
         server.quit()
         return True
     except Exception as e:
-        print(f"❌ Lỗi gửi Email SMTP: {str(e)}")
+        print(f"❌ Lỗi gửi Email SMTP_SSL: {str(e)}")
         return False
 
 def forgot_password(email):
