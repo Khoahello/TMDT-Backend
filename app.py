@@ -215,6 +215,9 @@ def api_get_shop_details(shop_id):
         return error_response(message, 404)
     except Exception as e: return server_error_response(e)
     
+# Nhớ nhìn lên đầu file app.py xem có import create_access_token chưa nhé, chưa có thì thêm dòng này:
+# from flask_jwt_extended import create_access_token
+
 @app.route('/api/shops', methods=['POST'])
 @jwt_required()
 def api_create_shop():
@@ -233,7 +236,21 @@ def api_create_shop():
             return error_response("Vui lòng cung cấp Tên cửa hàng (ShopName)", 400)
 
         is_success, message, result_data = create_shop(shop_name, address, hotline, manager_id, description)
-        if is_success: return jsonify(success_response(message, result_data)), 201 
+        
+        if is_success:
+            # BƯỚC PHÉP THUẬT: Cấp ngay 1 Access Token mới tinh mang quyền Manager (roleid = 2)
+            from flask_jwt_extended import create_access_token
+            new_vip_token = create_access_token(identity=manager_id, additional_claims={"roleid": 2})
+
+            # Trả về cả data Shop VÀ cái Token mới cho FE
+            response_payload = {
+                "status": "success",
+                "message": message,
+                "data": result_data,
+                "new_access_token": new_vip_token  # <--- Gửi vũ khí mới cho FE
+            }
+            return jsonify(response_payload), 201 
+
         return error_response(message, 400)
     except Exception as e: return server_error_response(e)
     
