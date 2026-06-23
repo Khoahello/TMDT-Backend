@@ -2,43 +2,38 @@ import os
 from werkzeug.utils import secure_filename
 import time
 
-# Cấu hình thư mục lưu ảnh tạm trên máy Local (Máy tính của ông)
-# Nó sẽ tự động tạo thư mục 'static/uploads' ngang hàng với app.py nếu chưa có
 UPLOAD_FOLDER = 'static/uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
 def upload_image(file_object):
-    """
-    Hàm xử lý file ảnh. 
-    HIỆN TẠI: Lưu tạm vào ổ cứng máy tính.
-    TƯƠNG LAI: Sẽ xóa code lưu Local đi và thay bằng 2 dòng code gọi API Cloudinary.
-    """
-    # Nếu không có file gửi lên, trả về None để DB tự hiểu là không cập nhật ảnh
     if not file_object or file_object.filename == '':
         return None
         
+    if not allowed_file(file_object.filename):
+        print(f"⚠️ [SECURITY REJECTED]: File '{file_object.filename}' không phải định dạng ảnh được phép!")
+        return None
+        
     try:
-        # 1. Bảo mật tên file (xóa các ký tự tiếng Việt có dấu, khoảng trắng, ký tự lạ)
-        # Ví dụ: "Ảnh Sản Phẩm.jpg" -> "Anh_San_Pham.jpg"
+        # Kiểm tra dung lượng vật lý (Giới hạn bọc thép tối đa 5MB)
+        file_object.seek(0, os.SEEK_END)
+        if file_object.tell() > 5 * 1024 * 1024:
+            print("⚠️ [SECURITY REJECTED]: Kích thước ảnh vượt quá 5MB!")
+            return None
+        file_object.seek(0, 0) # Trả con trỏ về đầu để lưu
+
         safe_filename = secure_filename(file_object.filename)
-        
-        # 2. Gắn thêm mốc thời gian vào tên file để chống trùng lặp
-        # Ví dụ 2 khách cùng up file tên "avatar.png" thì không bị ghi đè lên nhau
         unique_filename = f"{int(time.time())}_{safe_filename}"
-        
-        # 3. Tạo đường dẫn tuyệt đối để lưu vào máy tính
         file_path = os.path.join(UPLOAD_FOLDER, unique_filename)
         
-        # 4. Thực hiện lệnh lưu file vật lý vào ổ cứng
         file_object.save(file_path)
-        
-        # 5. Trả về cái đường dẫn ảo (URL) để lưu vào bảng Database
-        # Thay vì trả link Cloudinary, tạm thời trả về link thư mục Local
-        # Dùng replace để đảm bảo định dạng dấu '/' chuẩn trên cả Windows và Mac
         file_url = f"/{UPLOAD_FOLDER}/{unique_filename}".replace("\\", "/")
-        
         return file_url
         
     except Exception as e:
-        print("❌ Lỗi khi lưu file:", str(e))
+        print(f"❌ [UPLOAD FAILED]: {str(e)}")
         return None
