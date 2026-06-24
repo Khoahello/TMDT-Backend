@@ -94,12 +94,21 @@ def create_shop(shop_name, address, hotline, manager_id, description=None):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối CSDL", None
     try:
-        # 1. TRUY VẤN ĐỘNG: Bốc Khóa UUID của Manager và Customer ra dùng
-        manager_role_uuid = _get_role_uuid(conn, 'Manager')
-        customer_role_uuid = _get_role_uuid(conn, 'Customer')
-
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
+        # 1. TRUY VẤN ĐỘNG: Kiểm tra xem tài khoản này hiện tại đang giữ quyền gì trong DB
+        cursor.execute("""
+            SELECT u.RoleID::text AS roleid, r.RoleName AS rolename 
+            FROM Users u 
+            JOIN Roles r ON u.RoleID = r.RoleID 
+            WHERE u.UserID = %s;
+        """, (str(manager_id),))
+        current_user_role = cursor.fetchone()
+        
+        if not current_user_role:
+            return False, "Tài khoản người dùng thực hiện tạo cửa hàng không tồn tại", None
+            
+        # 2. TIẾN HÀNH CHÈN SHOP MỚI
         sql_insert_shop = """
             INSERT INTO Shops (ShopName, Address, Hotline, ManagerID, Description) 
             VALUES (%s, %s, %s, %s, %s) 
@@ -108,21 +117,33 @@ def create_shop(shop_name, address, hotline, manager_id, description=None):
         cursor.execute(sql_insert_shop, (shop_name, address, hotline, str(manager_id), description))
         new_shop = cursor.fetchone()
         
-        if new_shop.get('Rating') is not None: new_shop['Rating'] = float(new_shop['Rating'])
+        if new_shop.get('Rating') is not None: 
+            new_shop['Rating'] = float(new_shop['Rating'])
         
-        # 2. PHÂN QUYỀN ĐỘNG: Nạp Khóa Manager UUID vào User
-        sql_update_role = """
-            UPDATE Users 
-            SET RoleID = %s, UpdatedAt = CURRENT_TIMESTAMP 
-            WHERE UserID = %s AND RoleID = %s;
-        """
-        cursor.execute(sql_update_role, (manager_role_uuid, str(manager_id), customer_role_uuid))
+        # 3. XỬ LÝ PHÂN QUYỀN ĐỘNG THEO NGỮ CẢNH:
+        final_role_id = current_user_role['roleid']
+        final_role_name = current_user_role['rolename']
+        
+        # Chỉ đè lệnh UPDATE nâng cấp lên Manager nếu tài khoản này đang là Customer thuần túy
+        if current_user_role['rolename'] == 'Customer':
+            manager_role_uuid = _get_role_uuid(conn, 'Manager')
+            
+            cursor.execute("""
+                UPDATE Users 
+                SET RoleID = %s, UpdatedAt = CURRENT_TIMESTAMP 
+                WHERE UserID = %s;
+            """, (manager_role_uuid, str(manager_id)))
+            
+            final_role_id = manager_role_uuid
+            final_role_name = 'Manager'
+            
         conn.commit()
         
-        # Trả về gói dữ liệu bọc thép cho Router nạp Token
-        return True, "Tạo cửa hàng và phân quyền thành công", {
+        # Trả về chính xác vai trò thực tế cuối cùng của User (Admin giữ Admin, Manager giữ Manager)
+        return True, "Tạo cửa hàng và đồng bộ vai trò thành công", {
             "shop": new_shop,
-            "manager_role_uuid": manager_role_uuid
+            "final_role_uuid": final_role_id,
+            "final_role_name": final_role_name
         }
     except psycopg2.errors.ForeignKeyViolation:
         if conn: conn.rollback()

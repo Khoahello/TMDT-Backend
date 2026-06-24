@@ -243,12 +243,13 @@ def api_create_shop():
         
         if is_success:
             from flask_jwt_extended import create_access_token
-            # [HOÀN TOÀN ĐỘNG]: Bốc Khóa RoleID của Manager do CSDL trả về để nạp Token!
+            # [HOÀN TOÀN ĐỘNG]: Sử dụng vai trò thực tế từ DB dội ngược lên để cấp Token mới
+            # Triệt tiêu vĩnh viễn lỗi giáng chức Admin khi tạo Shop!
             new_vip_token = create_access_token(
                 identity=str(manager_id), 
                 additional_claims={
-                    "roleid": result_data['manager_role_uuid'],
-                    "rolename": "Manager"
+                    "roleid": result_data['final_role_uuid'],
+                    "rolename": result_data['final_role_name']
                 }
             )
 
