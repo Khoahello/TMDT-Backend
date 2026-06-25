@@ -86,9 +86,11 @@ def get_user_profile(user_id):
     if not conn: return False, "Lỗi kết nối", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Bổ sung Gender và ép kiểu Birthday sang chuỗi YYYY-MM-DD để JSON không lỗi
         sql = """
             SELECT u.UserID::text AS "UserID", u.FullName AS "FullName", u.Email AS "Email", 
                    u.PhoneNumber AS "PhoneNumber", u.Address AS "Address", u.AvatarURL AS "AvatarURL", 
+                   u.Gender AS "Gender", TO_CHAR(u.Birthday, 'YYYY-MM-DD') AS "Birthday",
                    u.RoleID::text AS "RoleID", r.RoleName AS "RoleName"
             FROM Users u JOIN Roles r ON u.RoleID = r.RoleID WHERE u.UserID = %s;
         """
@@ -106,21 +108,27 @@ def get_user_profile(user_id):
     finally:
         if conn: conn.close()
 
-def update_profile(user_id, full_name=None, address=None, avatar_url=None):
+def update_profile(user_id, full_name=None, phone=None, address=None, gender=None, birthday=None, avatar_url=None):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Nạp đủ bộ 6 tham số vào lệnh UPDATE
         sql = """
             UPDATE Users 
             SET FullName = COALESCE(%s, FullName), 
+                PhoneNumber = COALESCE(%s, PhoneNumber),
                 Address = COALESCE(%s, Address), 
+                Gender = COALESCE(%s, Gender),
+                Birthday = COALESCE(%s::DATE, Birthday),
                 AvatarURL = COALESCE(%s, AvatarURL),
                 UpdatedAt = CURRENT_TIMESTAMP
             WHERE UserID = %s AND IsActive = TRUE
-            RETURNING FullName AS "FullName", Address AS "Address", AvatarURL AS "AvatarURL", UpdatedAt AS "UpdatedAt";
+            RETURNING FullName AS "FullName", PhoneNumber AS "PhoneNumber", Address AS "Address", 
+                      Gender AS "Gender", TO_CHAR(Birthday, 'YYYY-MM-DD') AS "Birthday", 
+                      AvatarURL AS "AvatarURL", UpdatedAt AS "UpdatedAt";
         """
-        cursor.execute(sql, (full_name, address, avatar_url, user_id))
+        cursor.execute(sql, (full_name, phone, address, gender, birthday, avatar_url, user_id))
         updated = cursor.fetchone()
         conn.commit()
         

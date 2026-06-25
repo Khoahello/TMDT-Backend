@@ -1,5 +1,5 @@
-import eventlet
-eventlet.monkey_patch(socket=False) # Lệnh cấm: "Hãy bất đồng bộ mọi thứ, TRỪ CỔNG MẠNG RA để tao còn gửi Email!"
+# import eventlet
+# eventlet.monkey_patch(socket=False) # Lệnh cấm: "Hãy bất đồng bộ mọi thứ, TRỪ CỔNG MẠNG RA để tao còn gửi Email!"
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -674,7 +674,6 @@ def api_confirm_mock_payment(order_id):
     except Exception as e: return server_error_response(e)
     
 # ================= MODULE USERS & ROLES =================
-# (ĐÃ XÓA SẠCH SÀNH SANH MỌI HẰNG SỐ GÁN CỨNG UUID)
 
 @app.route('/api/roles', methods=['GET'])
 @jwt_required()
@@ -760,13 +759,25 @@ def api_update_profile():
         
         full_name = form_data.get('fullname')
         if full_name == "": full_name = None
+        
         address = form_data.get('address')
         if address == "": address = None
+        
+        # [BỌC THÉP TẤT CẢ CÁC TRƯỜNG MỚI]
+        phone = form_data.get('phone') or form_data.get('phonenumber')
+        if phone == "": phone = None
+        
+        gender = form_data.get('gender')
+        if gender == "": gender = None
+        
+        birthday = form_data.get('birthday')
+        if birthday == "": birthday = None
 
-        # Chỉ đẩy đi upload nếu thực sự đính kèm file ảnh
         avatar_url = upload_image(file_avatar) if file_avatar else None
 
-        is_success, msg, result = update_profile(user_id, full_name, address, avatar_url)
+        # [GỌI SERVICE VỚI ĐỦ BỘ PARAMETER]
+        is_success, msg, result = update_profile(user_id, full_name, phone, address, gender, birthday, avatar_url)
+        
         if is_success: return jsonify(success_response(msg, result)), 200
         return error_response(msg, 400)
     except Exception as e:
