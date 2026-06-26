@@ -59,57 +59,80 @@ def register_user(fullname, email, password, phone, address):
 
 def login_user(email, password):
     conn = get_db_connection()
-    if not conn: return False, "Lỗi kết nối Database", None
-
+    if not conn: return False, "Lỗi kết nối cơ sở dữ liệu", None
     try:
-        email = email.lower().strip()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        sql_query = """
-            SELECT u.UserID, u.FullName, u.Email, u.PasswordHash, u.RoleID, r.RoleName, u.IsActive
-            FROM Users u
-            JOIN Roles r ON u.RoleID = r.RoleID
+        
+        # 1. TRUY VẤN THÔNG TIN USER CƠ BẢN
+        sql_user = """
+            SELECT u.UserID::text AS userid, u.FullName AS fullname, u.Email AS email, 
+                   u.PhoneNumber AS phone, u.Address AS address, u.AvatarURL AS avatar,
+                   u.PasswordHash, u.IsActive, u.RoleID::text AS roleid, r.RoleName AS rolename
+            FROM Users u JOIN Roles r ON u.RoleID = r.RoleID 
             WHERE u.Email = %s;
         """
-        cursor.execute(sql_query, (email,))
+        cursor.execute(sql_user, (email.strip().lower(),))
         user = cursor.fetchone()
         
-        if not user: return False, "Email không tồn tại trong hệ thống", None
+        if not user:
+            return False, "Email đăng nhập không tồn tại trong hệ thống!", None
+            
+        if not user['isactive']:
+            return False, "Tài khoản của bạn đang bị tạm khóa!", None
+            
+        # Kiểm tra mật khẩu (dùng werkzeug.security hay bcrypt của ông)
+        from werkzeug.security import check_password_hash
+        if not check_password_hash(user['passwordhash'], password):
+            return False, "Mật khẩu không chính xác!", None
 
-        saved_password_hash = user.get('passwordhash') or user.get('PasswordHash')
-        is_active = user.get('isactive') if user.get('isactive') is not None else user.get('IsActive')
+        # 2. TẠO PAYLOAD TRẢ VỀ CHO FRONTEND
+        user_payload = {
+            "userid": user['userid'],
+            "fullname": user['fullname'],
+            "email": user['email'],
+            "phone": user['phone'],
+            "address": user['address'],
+            "avatar": user['avatar'],
+            "roleid": user['roleid'],
+            "rolename": user['rolename'],
+            "shop": None  # Mặc định khách hàng thường sẽ không có shop
+        }
 
-        if check_password_hash(saved_password_hash, password):
-            if not is_active: return False, "Tài khoản của bạn đã bị khóa", None
+        # 3. ⚡️ NGHIỆP VỤ THẦN THÁNH: NẾU LÀ MANAGER -> ĐI TÌM SHOP CỦA HỌ NẠP VÀO!
+        if user['rolename'] == 'Manager':
+            sql_shop = """
+                SELECT ShopID::text AS shopid, ShopName AS shopname, 
+                       ShopImageURL AS shopimage, Address AS shopaddress, IsActive AS isactive
+                FROM Shops 
+                WHERE ManagerID = %s AND IsActive = TRUE;
+            """
+            cursor.execute(sql_shop, (user['userid'],))
+            owned_shop = cursor.fetchone()
             
-            if 'passwordhash' in user: del user['passwordhash']
-            if 'PasswordHash' in user: del user['PasswordHash']
-            
-            str_userid = str(user['userid'])
-            str_roleid = str(user['roleid'])
-            user['userid'] = str_userid
-            user['roleid'] = str_roleid
+            if owned_shop:
+                user_payload['shop'] = dict(owned_shop)
 
-            # --- BƯỚC NÂNG CẤP JWT VĨ ĐẠI ---
-            # Gói CẢ roleid VÀ rolename vào JWT. 
-            # Giúp toàn bộ hệ thống vĩnh viễn chia tay việc gán cứng và đối chiếu chuỗi UUID!
-            access_token = create_access_token(
-                identity=str_userid, 
-                additional_claims={
-                    "roleid": str_roleid,
-                    "rolename": user['rolename'] 
-                }
-            )
-            
-            data = {"user": user, "access_token": access_token}
-            return True, "Đăng nhập thành công", data
-        else:
-            return False, "Mật khẩu không chính xác", None
-            
+        # 4. TẠO TOKEN JWT (Nạp cả rolename vào claim để các API sau dùng)
+        from flask_jwt_extended import create_access_token
+        access_token = create_access_token(
+            identity=user['userid'],
+            additional_claims={
+                "roleid": user['roleid'],
+                "rolename": user['rolename']
+            }
+        )
+
+        return True, "Đăng nhập thành công!", {
+            "access_token": access_token,
+            "user": user_payload
+        }
+        
     except Exception as e:
-        print("Lỗi SQL Login:", str(e))
-        return False, "Lỗi trong quá trình kiểm tra đăng nhập", None
+        if conn: conn.rollback()
+        return False, f"Lỗi hệ thống: {str(e)}", None
     finally:
         if conn: conn.close()
+
 
 def change_password(user_id, old_password, new_password):
     conn = get_db_connection()
