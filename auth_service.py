@@ -8,7 +8,6 @@ from flask_jwt_extended import create_access_token
 
 import urllib.request
 import urllib.error
-import requests # <--- Thư viện gọi HTTP siêu nhẹ có sẵn của Python
 import json
 
 def _get_role_uuid(conn, role_name):
