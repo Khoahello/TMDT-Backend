@@ -3,12 +3,11 @@ from data_manager import get_db_connection
 from werkzeug.security import generate_password_hash, check_password_hash
 import random
 from datetime import datetime, timedelta
-import smtplib
 import os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from flask_jwt_extended import create_access_token
 
+import urllib.request
+import urllib.error
 import requests # <--- Thư viện gọi HTTP siêu nhẹ có sẵn của Python
 import json
 
@@ -162,9 +161,14 @@ def change_password(user_id, old_password, new_password):
     finally:
         if conn: conn.close()
 
-# ================= HÀM GỬI MAIL BREVO GLOBAL (NO SANDBOX LIMIT) =================
+import urllib.request
+import urllib.error
+import json
+import os
+
+# ================= HÀM GỬI MAIL BREVO GLOBAL BẰNG THƯ VIỆN LÕI =================
 def send_otp_email(receiver_email, otp):
-    """Bắn mail qua cổng REST API của Brevo. Đến được 100% hòm thư toàn cầu."""
+    """Bắn mail qua cổng REST API của Brevo bằng urllib. Miễn nhiễm 100% lỗi Gunicorn/Render."""
     api_key = os.getenv("BREVO_API_KEY")
     sender_mail = os.getenv("BREVO_SENDER_EMAIL")
 
@@ -208,27 +212,34 @@ def send_otp_email(receiver_email, otp):
             "name": "Sàn TMDT DUE",
             "email": sender_mail
         },
-        "to": [
-            {
-                "email": receiver_email
-            }
-        ],
+        "to": [{"email": receiver_email}],
         "subject": f"[{otp}] Mã xác thực khôi phục mật khẩu DUE",
         "htmlContent": html_content
     }
 
     try:
-        response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=10)
+        # 1. Đóng gói dữ liệu thành dạng Bytes (yêu cầu bắt buộc của urllib)
+        data_bytes = json.dumps(payload).encode('utf-8')
         
-        if response.status_code in [200, 201, 202]:
-            print(f"🎉 [BREVO DISPATCH SUCCESS]: Đã bắn tới -> {receiver_email}")
-            return True
-        else:
-            print(f"❌ [BREVO REJECTED]: {response.text}")
-            return False
+        # 2. Khởi tạo một Request tiêu chuẩn của Python lõi
+        req = urllib.request.Request(url, data=data_bytes, headers=headers, method='POST')
+        
+        # 3. Phóng gói tin đi và chờ phản hồi (timeout 10 giây để chống treo server)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            status_code = response.getcode()
+            if status_code in [200, 201, 202]:
+                print(f"🎉 [BREVO DISPATCH SUCCESS]: Đã bắn OTP tới -> {receiver_email}")
+                return True
+            else:
+                print(f"❌ [BREVO REJECTED]: HTTP Status {status_code}")
+                return False
 
+    except urllib.error.HTTPError as e:
+        error_info = e.read().decode('utf-8')
+        print(f"❌ [BREVO HTTP ERROR]: Code {e.code} - {error_info}")
+        return False
     except Exception as e:
-        print(f"❌ [BREVO EXCEPTION]: {str(e)}")
+        print(f"❌ [BREVO SYSTEM EXCEPTION]: {str(e)}")
         return False
 
 def forgot_password(email):
