@@ -9,6 +9,9 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask_jwt_extended import create_access_token
 
+import requests # <--- Thư viện gọi HTTP siêu nhẹ có sẵn của Python
+import json
+
 def _get_role_uuid(conn, role_name):
     """Hàm nội bộ: Truy vấn động Database để bốc chính xác UUID của một Role theo Tên"""
     cursor = conn.cursor()
@@ -159,48 +162,73 @@ def change_password(user_id, old_password, new_password):
     finally:
         if conn: conn.close()
 
+# ================= HÀM GỬI MAIL BREVO GLOBAL (NO SANDBOX LIMIT) =================
 def send_otp_email(receiver_email, otp):
-    """Hàm gửi email chuẩn mực. Trung thực tuyệt đối."""
-    sender_email = os.getenv("EMAIL_SENDER")
-    sender_password = os.getenv("EMAIL_PASSWORD")
-    
-    if not sender_email or not sender_password:
-        print("⚠️ [SMTP CONFIG ERROR]: Chưa cấu hình EMAIL_SENDER hoặc EMAIL_PASSWORD")
+    """Bắn mail qua cổng REST API của Brevo. Đến được 100% hòm thư toàn cầu."""
+    api_key = os.getenv("BREVO_API_KEY")
+    sender_mail = os.getenv("BREVO_SENDER_EMAIL")
+
+    if not api_key or not sender_mail:
+        print("⚠️ [BREVO ERROR]: Thiếu cấu hình BREVO_API_KEY hoặc BREVO_SENDER_EMAIL")
         return False
 
-    message = MIMEMultipart()
-    message["From"] = sender_email
-    message["To"] = receiver_email
-    message["Subject"] = f"[{otp}] Mã xác thực khôi phục mật khẩu DUE"
+    url = "https://api.brevo.com/v3/smtp/email"
+
+    headers = {
+        "accept": "application/json",
+        "api-key": api_key,
+        "content-type": "application/json"
+    }
 
     html_content = f"""
-    <html>
-        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-            <div style="max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
-                <h2 style="color: #1dbf73; text-align: center;">Khôi Phục Mật Khẩu</h2>
-                <p>Chào bạn,</p>
-                <p>Hệ thống nhận được yêu cầu đặt lại mật khẩu cho tài khoản của bạn. Vui lòng sử dụng mã OTP dưới đây:</p>
-                <div style="text-align: center; margin: 30px 0;">
-                    <span style="font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #1dbf73; background: #f4f4f4; padding: 10px 20px; border-radius: 5px; border: 1px dashed #1dbf73;">
-                        {otp}
-                    </span>
-                </div>
-                <p style="color: #ff4d4f; font-size: 13px;">* Mã OTP có hiệu lực trong 15 phút.</p>
-                <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-                <p style="font-size: 12px; color: #999; text-align: center;">Hệ thống TMDT DUE.</p>
+    <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 0 auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 20px; background-color: #ffffff; box-shadow: 0 10px 25px rgba(0,0,0,0.05);">
+        <div style="text-align: center; margin-bottom: 25px;">
+            <span style="font-size: 22px; font-weight: 900; color: #0f172a; letter-spacing: -0.5px;">TECH</span>
+            <span style="font-size: 22px; font-weight: 900; color: #2563eb; letter-spacing: -0.5px;">TONIC</span>
+            <p style="color: #64748b; font-size: 13px; margin-top: 5px; font-weight: 600;">HỆ THỐNG XÁC THỰC SÀN TMDT DUE</p>
+        </div>
+        
+        <p style="color: #334155; font-size: 14px;">Xin chào,</p>
+        <p style="color: #334155; font-size: 14px; line-height: 1.6;">Bạn (hoặc ai đó) vừa yêu cầu đặt lại mật khẩu truy cập. Vui lòng nhập mã xác thực bảo mật dưới đây:</p>
+        
+        <div style="text-align: center; margin: 30px 0;">
+            <div style="display: inline-block; font-size: 34px; font-weight: 900; letter-spacing: 10px; color: #2563eb; background-color: #f1f5f9; padding: 14px 32px; border-radius: 16px; border: 2px solid #cbd5e1;">
+                {otp}
             </div>
-        </body>
-    </html>
+        </div>
+        
+        <p style="color: #e11d48; font-size: 12px; text-align: center; font-weight: 700;">* Mã xác thực có hiệu lực trong 15 phút. Tuyệt đối không gửi cho bất kỳ ai.</p>
+        <hr style="border: none; border-top: 1px solid #f1f5f9; margin: 25px 0;" />
+        <p style="color: #94a3b8; font-size: 11px; text-align: center; margin: 0;">Đại học Kinh tế Đà Nẵng (DUE) - Đồ án lập trình Backend.</p>
+    </div>
     """
-    message.attach(MIMEText(html_content, "html", "utf-8"))
-    
+
+    payload = {
+        "sender": {
+            "name": "Sàn TMDT DUE",
+            "email": sender_mail
+        },
+        "to": [
+            {
+                "email": receiver_email
+            }
+        ],
+        "subject": f"[{otp}] Mã xác thực khôi phục mật khẩu DUE",
+        "htmlContent": html_content
+    }
+
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=10) as server:
-            server.login(sender_email, sender_password)
-            server.send_message(message)
-        return True
+        response = requests.post(url, data=json.dumps(payload), headers=headers, timeout=10)
+        
+        if response.status_code in [200, 201, 202]:
+            print(f"🎉 [BREVO DISPATCH SUCCESS]: Đã bắn tới -> {receiver_email}")
+            return True
+        else:
+            print(f"❌ [BREVO REJECTED]: {response.text}")
+            return False
+
     except Exception as e:
-        print(f"❌ [SMTP DISPATCH FAILED]: {str(e)}")
+        print(f"❌ [BREVO EXCEPTION]: {str(e)}")
         return False
 
 def forgot_password(email):
