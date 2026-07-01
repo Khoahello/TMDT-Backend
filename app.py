@@ -43,6 +43,13 @@ from stats_service import get_total_revenue, get_top_products, get_order_status_
 # Module Chat
 from chat_service import get_chat_history, send_message
 
+# Module Cart
+from cart_service import get_cart, clear_cart, checkout_cart, add_item, update_item_qty, delete_item
+
+# Module Permission
+from role_permission_service import get_all_permissions, create_role, update_role, delete_role, get_role_permissions, update_role_permissions, get_user_permissions
+
+
 load_dotenv() # Load biến môi trường từ file .env
 
 app = Flask(__name__)
@@ -1022,6 +1029,216 @@ def on_join_chat(data):
     except Exception as e:
         print(f"❌ [WS REJECTED]: Token từ chối - {str(e)}")
         return False
+    
+# ================= 1. TÀI NGUYÊN GIỎ HÀNG (/api/cart) =================
+
+@app.route('/api/cart', methods=['GET'])
+@jwt_required()
+def api_get_cart():
+    user_id = get_jwt_identity()
+    is_success, msg, data = get_cart(user_id)
+    return jsonify(success_response(msg, data)) if is_success else error_response(msg, 400)
+
+@app.route('/api/cart', methods=['DELETE'])
+@jwt_required()
+def api_clear_cart():
+    user_id = get_jwt_identity()
+    is_success, msg, _ = clear_cart(user_id)
+    return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
+
+@app.route('/api/cart/checkout', methods=['POST'])
+@jwt_required()
+def api_checkout_cart():
+    try:
+        user_id = get_jwt_identity()
+        data = get_clean_json()
+        if not data: return error_response("Vui lòng gửi dữ liệu thanh toán", 400)
+        
+        payment_method = data.get('payment_method', 'COD')
+        shipping_address = data.get('shipping_address')
+        voucher_code = data.get('voucher_code')
+        
+        if not shipping_address:
+            return error_response("Vui lòng cung cấp địa chỉ giao hàng", 400)
+            
+        is_success, msg, result = checkout_cart(user_id, payment_method, shipping_address, voucher_code)
+        return jsonify(success_response(msg, result)) if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+# ================= 2. TÀI NGUYÊN CHI TIẾT SẢN PHẨM TRONG GIỎ (/api/cart/items) =================
+
+@app.route('/api/cart/items', methods=['POST'])
+@jwt_required()
+def api_add_cart_item():
+    try:
+        user_id = get_jwt_identity()
+        data = get_clean_json()
+        
+        product_id = data.get('product_id')
+        quantity = data.get('quantity')
+        
+        if not product_id or quantity is None: return error_response("Thiếu product_id hoặc quantity", 400)
+        try:
+            quantity = int(quantity)
+            if quantity <= 0: return error_response("Số lượng phải > 0", 400)
+        except: return error_response("Số lượng không hợp lệ", 400)
+            
+        is_success, msg, _ = add_item(user_id, str(product_id), quantity)
+        return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+@app.route('/api/cart/items/<string:item_id>', methods=['PATCH'])
+@jwt_required()
+def api_update_cart_item(item_id):
+    try:
+        user_id = get_jwt_identity()
+        data = get_clean_json()
+        
+        quantity = data.get('quantity')
+        if quantity is None: return error_response("Thiếu quantity", 400)
+        try: quantity = int(quantity)
+        except: return error_response("Số lượng không hợp lệ", 400)
+            
+        is_success, msg, _ = update_item_qty(user_id, item_id.strip(), quantity)
+        return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+@app.route('/api/cart/items/<string:item_id>', methods=['DELETE'])
+@jwt_required()
+def api_delete_cart_item(item_id):
+    user_id = get_jwt_identity()
+    is_success, msg, _ = delete_item(user_id, item_id.strip())
+    return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
+
+# ================= MODULE ROLES & PERMISSIONS =================
+
+@app.route('/api/permissions', methods=['GET'])
+@jwt_required()
+def api_get_all_permissions():
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Quyền hạn tối cao Admin mới được truy cập hệ thống quyền!", 403)
+            
+        is_success, msg, data = get_all_permissions()
+        return jsonify(success_response(msg, data)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/roles', methods=['POST'])
+@jwt_required()
+def api_create_new_role():
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Hành động bị từ chối. Yêu cầu quyền Admin!", 403)
+            
+        data = get_clean_json()
+        if not data: return error_response("Dữ liệu gửi lên trống!", 400)
+        
+        role_name = data.get('rolename') or data.get('role_name')
+        description = data.get('description') or ""
+        permission_ids = data.get('permission_ids') or data.get('permissions')
+        
+        if not role_name: return error_response("Vui lòng nhập tên vai trò (role_name)", 400)
+        
+        is_success, msg, res_data = create_role(role_name, description, permission_ids)
+        return jsonify(success_response(msg, res_data)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/roles/<string:id>', methods=['PATCH'])
+@jwt_required()
+def api_patch_role(id):
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Yêu cầu quyền Admin để sửa thông tin vai trò!", 403)
+            
+        data = get_clean_json()
+        role_name = data.get('rolename') or data.get('role_name') if data else None
+        description = data.get('description') if data else None
+        
+        is_success, msg, res_data = update_role(id.strip(), role_name, description)
+        return jsonify(success_response(msg, res_data)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/roles/<string:id>', methods=['DELETE'])
+@jwt_required()
+def api_delete_role(id):
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Chỉ Admin mới có quyền xóa vai trò khỏi lõi hệ thống!", 403)
+            
+        is_success, msg, _ = delete_role(id.strip())
+        return jsonify(success_response(msg)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/roles/<string:id>/permissions', methods=['GET'])
+@jwt_required()
+def api_get_role_permissions(id):
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Bạn không có quyền xem cấu hình phân quyền của vai trò này!", 403)
+            
+        is_success, msg, data = get_role_permissions(id.strip())
+        return jsonify(success_response(msg, data)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/roles/<string:id>/permissions', methods=['PATCH'])
+@jwt_required()
+def api_update_role_permissions(id):
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Yêu cầu tài khoản Admin để chỉnh sửa ma trận phân quyền!", 403)
+            
+        data = get_clean_json()
+        permission_ids = data.get('permission_ids') or data.get('permissions') if data else None
+        
+        if not isinstance(permission_ids, list):
+            return error_response("Danh sách permission_ids phải là một mảng dữ liệu!", 400)
+            
+        is_success, msg, _ = update_role_permissions(id.strip(), permission_ids)
+        return jsonify(success_response(msg)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/users/me/permissions', methods=['GET'])
+@jwt_required()
+def api_get_my_permissions():
+    """Hàm lấy toàn bộ quyền hạn của User đang đăng nhập giúp Front-end chặn UI nhanh"""
+    try:
+        user_id = get_jwt_identity()
+        user_perms = get_user_permissions(user_id)
+        return jsonify(success_response("Tải danh sách quyền hạn cá nhân thành công", user_perms)), 200
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/permissions/check', methods=['GET'])
+@jwt_required()
+def api_check_single_permission():
+    """Hàm kiểm tra nóng một quyền cụ thể truyền qua query string (?key=product_create)"""
+    try:
+        user_id = get_jwt_identity()
+        perm_key = request.args.get('key', '').strip()
+        
+        if not perm_key:
+            return error_response("Vui lòng truyền tham số ?key= để kiểm tra!", 400)
+            
+        user_perms = get_user_permissions(user_id)
+        has_permission = perm_key in user_perms
+        
+        return jsonify(success_response(
+            "Kiểm tra trạng thái quyền hạn thành công", 
+            {"permission": perm_key, "has_permission": has_permission}
+        )), 200
+    except Exception as e: return server_error_response(e)
 
 # ================= ĐỘNG CƠ KHỞI CHẠY SERVER =================
 if __name__ == '__main__':
