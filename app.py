@@ -1054,16 +1054,33 @@ def api_checkout_cart():
         data = get_clean_json()
         if not data: return error_response("Vui lòng gửi dữ liệu thanh toán", 400)
         
-        payment_method = data.get('payment_method', 'COD')
-        shipping_address = data.get('shipping_address')
-        voucher_code = data.get('voucher_code')
+        payment_method = data.get('paymentmethod') or data.get('payment_method') or 'COD'
         
-        if not shipping_address:
-            return error_response("Vui lòng cung cấp địa chỉ giao hàng", 400)
+        # Bốc các trường thông tin giao hàng
+        shipping_name = data.get('shippingname') or data.get('fullname') or data.get('shipping_name')
+        shipping_phone = data.get('shippingphone') or data.get('phone') or data.get('shipping_phone')
+        shipping_address = data.get('shippingaddress') or data.get('address') or data.get('shipping_address')
+        note = data.get('note')
+        voucher_code = data.get('vouchercode') or data.get('voucher_code')
+        
+        # Validate chặt chẽ
+        if not shipping_name or not shipping_phone or not shipping_address:
+            return error_response("Vui lòng cung cấp đầy đủ Tên, Số điện thoại và Địa chỉ giao hàng", 400)
             
-        is_success, msg, result = checkout_cart(user_id, payment_method, shipping_address, voucher_code)
+        # Phóng xuống tầng Service
+        is_success, msg, result = checkout_cart(
+            user_id=user_id, 
+            payment_method=payment_method, 
+            shipping_name=shipping_name, 
+            shipping_phone=shipping_phone, 
+            shipping_address=shipping_address, 
+            note=note, 
+            voucher_code=voucher_code
+        )
+        
         return jsonify(success_response(msg, result)) if is_success else error_response(msg, 400)
-    except Exception as e: return server_error_response(e)
+    except Exception as e: 
+        return server_error_response(e)
 
 # ================= 2. TÀI NGUYÊN CHI TIẾT SẢN PHẨM TRONG GIỎ (/api/cart/items) =================
 

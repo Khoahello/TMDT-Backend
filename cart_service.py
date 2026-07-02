@@ -65,15 +65,16 @@ def clear_cart(user_id):
     finally:
         if conn: conn.close()
 
-def checkout_cart(user_id, payment_method, shipping_address, voucher_code=None):
+def checkout_cart(user_id, payment_method, shipping_name, shipping_phone, shipping_address, note=None, voucher_code=None):
     """Nghiệp vụ Checkout: Gom nhóm SP theo Shop -> Tạo nhiều Order -> Xóa Cart"""
     conn = get_db_connection()
-    if not conn: return False, "Lỗi kết nối", None
+    if not conn: return False, "Lỗi kết nối Database", None
+    
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cart_id = _get_or_create_cart(cursor, user_id)
         
-        # Lấy toàn bộ sản phẩm trong giỏ kèm ShopID
+        # 1. Lấy toàn bộ sản phẩm trong giỏ kèm ShopID
         cursor.execute("""
             SELECT ci.ProductID, ci.Quantity, p.Price, p.ShopID, p.StockQuantity
             FROM CartItems ci JOIN Products p ON ci.ProductID = p.ProductID
@@ -84,12 +85,12 @@ def checkout_cart(user_id, payment_method, shipping_address, voucher_code=None):
         if not items:
             return False, "Giỏ hàng của bạn đang trống", None
             
-        # Kiểm tra tồn kho trước khi thanh toán
+        # 2. Kiểm tra tồn kho trước khi thanh toán
         for item in items:
             if item['quantity'] > item['stockquantity']:
                 return False, f"Một số sản phẩm không đủ tồn kho. Vui lòng kiểm tra lại giỏ hàng.", None
 
-        # GOM NHÓM SẢN PHẨM THEO TỪNG CỬA HÀNG
+        # 3. GOM NHÓM SẢN PHẨM THEO TỪNG CỬA HÀNG (Bài toán Split Order)
         shop_orders = {}
         for item in items:
             shop_id = item['shopid']
@@ -101,16 +102,22 @@ def checkout_cart(user_id, payment_method, shipping_address, voucher_code=None):
 
         created_orders = []
         
-        # TẠO ĐƠN HÀNG CHO TỪNG SHOP
+        # 4. TẠO ĐƠN HÀNG CHO TỪNG SHOP
         for shop_id, order_data in shop_orders.items():
-            # 1. Tạo bản ghi Order
+            # Tạo bản ghi Order (Bổ sung Tên, SĐT, Địa chỉ, Ghi chú)
             cursor.execute("""
-                INSERT INTO Orders (UserID, ShopID, TotalAmount, PaymentMethod, ShippingAddress)
-                VALUES (%s, %s, %s, %s, %s) RETURNING OrderID::text;
-            """, (user_id, shop_id, order_data['total_amount'], payment_method, shipping_address))
+                INSERT INTO Orders (
+                    UserID, ShopID, TotalAmount, PaymentMethod, 
+                    ShippingName, ShippingPhone, ShippingAddress, Note
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING OrderID::text;
+            """, (
+                user_id, shop_id, order_data['total_amount'], payment_method,
+                shipping_name, shipping_phone, shipping_address, note
+            ))
             new_order_id = cursor.fetchone()['orderid']
             
-            # 2. Tạo chi tiết đơn hàng (OrderDetails) và trừ Tồn kho
+            # Tạo chi tiết đơn hàng (OrderDetails) và trừ Tồn kho
             for item in order_data['items']:
                 cursor.execute("""
                     INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice)
@@ -126,7 +133,7 @@ def checkout_cart(user_id, payment_method, shipping_address, voucher_code=None):
                 
             created_orders.append(new_order_id)
 
-        # Thanh toán xong -> Xóa sạch giỏ hàng
+        # 5. Thanh toán xong -> Xóa sạch giỏ hàng
         cursor.execute("DELETE FROM CartItems WHERE CartID = %s;", (cart_id,))
         cursor.execute("UPDATE Cart SET UpdatedAt = CURRENT_TIMESTAMP WHERE CartID = %s;", (cart_id,))
         
@@ -136,9 +143,8 @@ def checkout_cart(user_id, payment_method, shipping_address, voucher_code=None):
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi xử lý thanh toán: {str(e)}", None
-    finally:
+    finally: 
         if conn: conn.close()
-
 # ================= 2. API CÁC ITEM TRONG GIỎ (/api/cart/items) =================
 
 def add_item(user_id, product_id, quantity):
