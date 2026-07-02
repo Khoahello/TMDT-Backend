@@ -1050,36 +1050,27 @@ def api_clear_cart():
 @jwt_required()
 def api_checkout_cart():
     try:
+        # Bốc ngầm danh tính UserID trực tiếp từ chữ ký bọc thép của mã JWT Token
         user_id = get_jwt_identity()
         data = get_clean_json()
-        if not data: return error_response("Vui lòng gửi dữ liệu thanh toán", 400)
         
-        payment_method = data.get('paymentmethod') or data.get('payment_method') or 'COD'
+        # Frontend chỉ cần gửi lên đúng 3 tham số thô này (hoặc để trống mặc định)
+        payment_method = data.get('payment_method') or data.get('paymentmethod') or 'COD'
+        note = data.get('note') or ""
+        voucher_code = data.get('voucher_code') or data.get('vouchercode') or None
         
-        # Bốc các trường thông tin giao hàng
-        shipping_name = data.get('shippingname') or data.get('fullname') or data.get('shipping_name')
-        shipping_phone = data.get('shippingphone') or data.get('phone') or data.get('shipping_phone')
-        shipping_address = data.get('shippingaddress') or data.get('address') or data.get('shipping_address')
-        note = data.get('note')
-        voucher_code = data.get('vouchercode') or data.get('voucher_code')
-        
-        # Validate chặt chẽ
-        if not shipping_name or not shipping_phone or not shipping_address:
-            return error_response("Vui lòng cung cấp đầy đủ Tên, Số điện thoại và Địa chỉ giao hàng", 400)
-            
-        # Phóng xuống tầng Service
+        # Kích hoạt trạm xử lý bốc dữ liệu tự động ở tầng Service
         is_success, msg, result = checkout_cart(
-            user_id=user_id, 
-            payment_method=payment_method, 
-            shipping_name=shipping_name, 
-            shipping_phone=shipping_phone, 
-            shipping_address=shipping_address, 
-            note=note, 
+            user_id=user_id,
+            payment_method=payment_method,
+            note=note,
             voucher_code=voucher_code
         )
         
-        return jsonify(success_response(msg, result)) if is_success else error_response(msg, 400)
-    except Exception as e: 
+        if is_success:
+            return jsonify(success_response(msg, result)), 200
+        return error_response(msg, 400)
+    except Exception as e:
         return server_error_response(e)
 
 # ================= 2. TÀI NGUYÊN CHI TIẾT SẢN PHẨM TRONG GIỎ (/api/cart/items) =================

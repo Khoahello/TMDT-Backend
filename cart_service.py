@@ -65,16 +65,51 @@ def clear_cart(user_id):
     finally:
         if conn: conn.close()
 
-def checkout_cart(user_id, payment_method, shipping_name, shipping_phone, shipping_address, note=None, voucher_code=None):
-    """Nghiệp vụ Checkout: Gom nhóm SP theo Shop -> Tạo nhiều Order -> Xóa Cart"""
+def checkout_cart(user_id, payment_method='COD', note=None, voucher_code=None):
+    """Nghiệp vụ Checkout bọc thép: Tự động tra cứu hồ sơ người dùng -> Áp Voucher -> Tách đơn theo Shop -> Xóa Cart"""
     conn = get_db_connection()
-    if not conn: return False, "Lỗi kết nối Database", None
-    
+    if not conn: return False, "Lỗi kết nối cơ sở dữ liệu hệ thống", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cart_id = _get_or_create_cart(cursor, user_id)
         
-        # 1. Lấy toàn bộ sản phẩm trong giỏ kèm ShopID
+        # BƯỚC 1: TỰ ĐỘNG TRA CỨU HỒ SƠ TỪ USERID (BẢO MẬT TUYỆT ĐỐI)
+        cursor.execute("""
+            SELECT FullName, PhoneNumber, Address 
+            FROM Users 
+            WHERE UserID = %s AND IsActive = TRUE;
+        """, (user_id,))
+        user_profile = cursor.fetchone()
+        
+        if not user_profile:
+            return False, "Tài khoản người dùng không tồn tại hoặc đã bị khóa", None
+            
+        shipping_name = user_profile['fullname']
+        shipping_phone = user_profile['phonenumber']
+        shipping_address = user_profile['address']
+        
+        # Rào chắn kiểm toán: Nếu tài khoản chưa cập nhật SĐT hoặc Địa chỉ thì chặn không cho mua
+        if not shipping_phone or not shipping_address:
+            return False, "Tài khoản của bạn chưa cập nhật đầy đủ Số điện thoại hoặc Địa chỉ giao hàng. Vui lòng bổ sơ vào Hồ sơ cá nhân trước khi đặt hàng!", None
+
+        # BƯỚC 2: RÀ SOÁT VÀ ÁP DỤNG MÃ GIẢM GIÁ VOUCHER (NẾU CÓ)
+        discount_amount = 0
+        if voucher_code:
+            cursor.execute("""
+                SELECT VoucherCode, DiscountAmount, IsActive, ExpiryDate 
+                FROM Vouchers 
+                WHERE VoucherCode = %s;
+            """, (voucher_code.strip(),))
+            voucher = cursor.fetchone()
+            if not voucher or not voucher['isactive']:
+                return False, "Mã giảm giá (Voucher) không hợp lệ hoặc đã hết hạn sử dụng!", None
+            discount_amount = voucher['discountamount']
+
+        # BƯỚC 3: TRÍCH XUẤT GIỎ HÀNG HIỆN TẠI
+        cursor.execute("SELECT CartID FROM Cart WHERE UserID = %s;", (user_id,))
+        cart_row = cursor.fetchone()
+        if not cart_row: return False, "Không tìm thấy giỏ hàng hợp lệ của người dùng này", None
+        cart_id = cart_row['cartid']
+
         cursor.execute("""
             SELECT ci.ProductID, ci.Quantity, p.Price, p.ShopID, p.StockQuantity
             FROM CartItems ci JOIN Products p ON ci.ProductID = p.ProductID
@@ -83,48 +118,59 @@ def checkout_cart(user_id, payment_method, shipping_name, shipping_phone, shippi
         items = cursor.fetchall()
         
         if not items:
-            return False, "Giỏ hàng của bạn đang trống", None
+            return False, "Giỏ hàng của bạn đang trống trống, không thể thực hiện thanh toán!", None
             
-        # 2. Kiểm tra tồn kho trước khi thanh toán
+        # Kiểm tra hàng tồn kho toàn cục
         for item in items:
             if item['quantity'] > item['stockquantity']:
-                return False, f"Một số sản phẩm không đủ tồn kho. Vui lòng kiểm tra lại giỏ hàng.", None
+                return False, "Một số mặt hàng trong giỏ đã thay đổi số lượng tồn kho, không đủ cung ứng!", None
 
-        # 3. GOM NHÓM SẢN PHẨM THEO TỪNG CỬA HÀNG (Bài toán Split Order)
+        # BƯỚC 4: THI THIÊN ĐÒN CHẺ ĐƠN HÀNG THEO SHOP (GOM NHÓM SHOP)
         shop_orders = {}
         for item in items:
             shop_id = item['shopid']
             if shop_id not in shop_orders:
-                shop_orders[shop_id] = {'total_amount': 0, 'items': []}
-            
+                shop_orders[shop_id] = {'sub_total': 0, 'items': []}
             shop_orders[shop_id]['items'].append(item)
-            shop_orders[shop_id]['total_amount'] += (item['price'] * item['quantity'])
+            shop_orders[shop_id]['sub_total'] += (item['price'] * item['quantity'])
 
         created_orders = []
-        
-        # 4. TẠO ĐƠN HÀNG CHO TỪNG SHOP
+        voucher_applied = False
+
+        # BƯỚC 5: LẬP KHUÔN ĐƠN HÀNG GHI VÀO POSTGRESQL
         for shop_id, order_data in shop_orders.items():
-            # Tạo bản ghi Order (Bổ sung Tên, SĐT, Địa chỉ, Ghi chú)
+            sub_total = order_data['sub_total']
+            current_discount = 0
+            
+            # Nếu có voucher, áp dụng khấu trừ trực tiếp vào đơn hàng đầu tiên hợp lệ
+            if voucher_code and not voucher_applied:
+                current_discount = discount_amount
+                voucher_applied = True
+                
+            total_amount = max(0, sub_total - current_discount)
+
+            # Khớp nối ghi đĩa đơn hàng tổng (Tự động nạp mớ thông tin bốc từ Users)
             cursor.execute("""
                 INSERT INTO Orders (
                     UserID, ShopID, TotalAmount, PaymentMethod, 
-                    ShippingName, ShippingPhone, ShippingAddress, Note
+                    ShippingAddress, ShippingName, ShippingPhone, Note,
+                    VoucherCode, DiscountAmount
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING OrderID::text;
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING OrderID::text;
             """, (
-                user_id, shop_id, order_data['total_amount'], payment_method,
-                shipping_name, shipping_phone, shipping_address, note
+                user_id, shop_id, total_amount, payment_method,
+                shipping_address, shipping_name, shipping_phone, note,
+                voucher_code if current_discount > 0 else None, current_discount
             ))
             new_order_id = cursor.fetchone()['orderid']
             
-            # Tạo chi tiết đơn hàng (OrderDetails) và trừ Tồn kho
+            # Ghi dữ liệu chi tiết đơn hàng và trừ tồn kho vật lý
             for item in order_data['items']:
                 cursor.execute("""
                     INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice)
                     VALUES (%s, %s, %s, %s);
                 """, (new_order_id, item['productid'], item['quantity'], item['price']))
                 
-                # Trừ tồn kho, cộng số lượng đã bán
                 cursor.execute("""
                     UPDATE Products 
                     SET StockQuantity = StockQuantity - %s, SoldQuantity = SoldQuantity + %s 
@@ -133,18 +179,19 @@ def checkout_cart(user_id, payment_method, shipping_name, shipping_phone, shippi
                 
             created_orders.append(new_order_id)
 
-        # 5. Thanh toán xong -> Xóa sạch giỏ hàng
+        # Đơn hàng thông quan thành công -> Giải phóng xóa sạch giỏ hàng của khách
         cursor.execute("DELETE FROM CartItems WHERE CartID = %s;", (cart_id,))
         cursor.execute("UPDATE Cart SET UpdatedAt = CURRENT_TIMESTAMP WHERE CartID = %s;", (cart_id,))
         
         conn.commit()
-        return True, "Đặt hàng thành công", {"created_orders": created_orders}
+        return True, "Xử lý đơn hàng thành công!", {"created_orders": created_orders}
         
     except Exception as e:
         if conn: conn.rollback()
-        return False, f"Lỗi xử lý thanh toán: {str(e)}", None
-    finally: 
+        return False, f"Lỗi quy trình giao dịch: {str(e)}", None
+    finally:
         if conn: conn.close()
+
 # ================= 2. API CÁC ITEM TRONG GIỎ (/api/cart/items) =================
 
 def add_item(user_id, product_id, quantity):
