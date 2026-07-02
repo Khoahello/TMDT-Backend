@@ -11,35 +11,77 @@ def get_all_orders(page=1, limit=10, user_id=None, role_name=None):
         where_clause = ""
         params = []
         
-        # [PHÂN QUYỀN ĐỘNG]: Bốc tên RoleName ra dùng
+        # [PHÂN QUYỀN ĐỘNG]: Xác định luồng truy vấn
         if role_name == 'Customer': 
-            where_clause = "WHERE UserID = %s"
+            where_clause = "WHERE o.UserID = %s"
             params.append(user_id)
         elif role_name == 'Manager': 
-            where_clause = "WHERE ShopID IN (SELECT ShopID FROM Shops WHERE ManagerID = %s)"
+            where_clause = "WHERE o.ShopID IN (SELECT ShopID FROM Shops WHERE ManagerID = %s)"
             params.append(user_id)
 
-        cursor.execute(f"SELECT COUNT(*) FROM Orders {where_clause};", tuple(params))
+        # Tính tổng số đơn hàng (Dùng bí danh 'o' cho đồng bộ câu SQL dưới)
+        cursor.execute(f"SELECT COUNT(*) FROM Orders o {where_clause};", tuple(params))
         total_items = cursor.fetchone()['count']
         offset = (page - 1) * limit
         
-        # Ép tường minh ShopID::text
+        # [TUYỆT KỸ JSON_AGG]: Gom toàn bộ Order, Tên Shop, và Danh sách Món hàng vào 1 phát Query!
         sql_query = f"""
             SELECT 
-                OrderID::text AS "OrderID", UserID::text AS "UserID", ShopID::text AS "ShopID",
-                OrderDate AS "OrderDate", TotalAmount AS "TotalAmount", Status AS "Status",
-                PaymentMethod AS "PaymentMethod", PaymentStatus AS "PaymentStatus", ShippingAddress AS "ShippingAddress"
-            FROM Orders
+                o.OrderID::text AS "OrderID", 
+                o.UserID::text AS "UserID", 
+                o.ShopID::text AS "ShopID",
+                s.ShopName AS "ShopName",
+                o.OrderDate AS "OrderDate", 
+                o.TotalAmount AS "TotalAmount", 
+                o.Status AS "Status",
+                o.PaymentMethod AS "PaymentMethod", 
+                o.PaymentStatus AS "PaymentStatus", 
+                o.ShippingAddress AS "ShippingAddress",
+                o.ShippingName AS "ShippingName",
+                o.ShippingPhone AS "ShippingPhone",
+                
+                -- Gom mảng các mặt hàng (Items) trực tiếp từ PostgreSQL
+                COALESCE(
+                    json_agg(
+                        json_build_object(
+                            'ProductID', od.ProductID::text,
+                            'ProductName', p.ProductName,
+                            'Quantity', od.Quantity,
+                            'UnitPrice', od.UnitPrice,
+                            'ImageURL', (
+                                SELECT pi.ImageURL 
+                                FROM ProductImages pi 
+                                WHERE pi.ProductID = p.ProductID AND pi.IsPrimary = TRUE 
+                                LIMIT 1
+                            )
+                        )
+                    ) FILTER (WHERE od.OrderDetailID IS NOT NULL), '[]'::json
+                ) AS "Items"
+
+            FROM Orders o
+            LEFT JOIN Shops s ON o.ShopID = s.ShopID
+            LEFT JOIN OrderDetails od ON o.OrderID = od.OrderID
+            LEFT JOIN Products p ON od.ProductID = p.ProductID
             {where_clause}
-            ORDER BY OrderDate DESC LIMIT %s OFFSET %s;
+            GROUP BY o.OrderID, s.ShopName
+            ORDER BY o.OrderDate DESC 
+            LIMIT %s OFFSET %s;
         """
+        
         params.extend([limit, offset])
         cursor.execute(sql_query, tuple(params))
         orders = cursor.fetchall()
         
+        # Định dạng lại dữ liệu thập phân cho gọn
         for order in orders:
             if order.get('TotalAmount') is not None:
                 order['TotalAmount'] = float(order['TotalAmount'])
+            
+            # Xử lý mảng Items (Chuyển chuỗi JSON của Postgres thành mảng Python)
+            if order.get('Items'):
+                for item in order['Items']:
+                    if item.get('UnitPrice') is not None:
+                        item['UnitPrice'] = float(item['UnitPrice'])
         
         total_pages = math.ceil(total_items / limit) if total_items > 0 else 1
         pagination_result = {
@@ -47,6 +89,7 @@ def get_all_orders(page=1, limit=10, user_id=None, role_name=None):
             "meta": { "total_items": total_items, "current_page": page, "total_pages": total_pages }
         }
         return True, "Lấy danh sách đơn hàng thành công", pagination_result
+        
     except Exception as e:
         if conn: conn.rollback()
         return False, str(e), None
