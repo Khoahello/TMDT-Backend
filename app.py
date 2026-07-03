@@ -598,33 +598,31 @@ def api_create_order():
         if not data: return error_response("Vui lòng cung cấp dữ liệu đơn hàng", 400)
 
         user_id = get_jwt_identity()
-        # [VÁ QUẢ BOM ÉP KIỂU]: Lấy string thuần, tuyệt đối không bọc int()
         shop_id = str(data.get('shopid')).strip()
-        shipping_address = data.get('shippingaddress')
         payment_method = data.get('paymentmethod', 'COD') 
+        note = data.get('note') or ""
         items_raw = data.get('items', [])
+        
+        shipping_address = data.get('shippingaddress') or data.get('shipping_address')
+        shipping_name = data.get('shippingname') or data.get('shipping_name') or data.get('fullname')
+        shipping_phone = data.get('shippingphone') or data.get('shipping_phone') or data.get('phone')
 
-        if not data.get('shopid') or not shipping_address or not items_raw:
-            return error_response("Vui lòng điền đầy đủ UserID, ShopID, Địa chỉ và Danh sách món", 400)
+        if not data.get('shopid') or not items_raw:
+            return error_response("Vui lòng điền đầy đủ ShopID và Danh sách món", 400)
             
-        if len(items_raw) == 0: return error_response("Giỏ hàng đang trống", 400)
-
         items_list = []
-        try:
-            for item in items_raw:
-                p_id = item.get('ProductID') or item.get('productid')
-                qty = item.get('Quantity') or item.get('quantity')
-                if not p_id or qty is None: raise ValueError
-                
-                # SỬA CHUẨN: ProductID giữ nguyên string, chỉ ép int(Quantity)
-                items_list.append({'ProductID': str(p_id).strip(), 'Quantity': int(qty)})
-        except ValueError: 
-            return error_response("Định dạng món hàng hoặc số lượng không hợp lệ", 400)
+        for item in items_raw:
+            p_id = item.get('ProductID') or item.get('productid')
+            qty = item.get('Quantity') or item.get('quantity')
+            items_list.append({'ProductID': str(p_id).strip(), 'Quantity': int(qty)})
 
-        is_success, message, result_data = create_order(user_id, shop_id, shipping_address, payment_method, items_list)
+        is_success, message, result_data = create_order(
+            user_id, shop_id, shipping_address, shipping_name, shipping_phone, note, payment_method, items_list
+        )
         if is_success: return jsonify(success_response(message, result_data)), 201
         return error_response(message, 400)
-    except Exception as e: return server_error_response(e)
+    except Exception as e: 
+        return server_error_response(e)
     
 @app.route('/api/orders/<string:order_id>/status', methods=['PATCH', 'PUT'])
 @jwt_required()
@@ -1030,7 +1028,7 @@ def on_join_chat(data):
         print(f"❌ [WS REJECTED]: Token từ chối - {str(e)}")
         return False
     
-# ================= 1. TÀI NGUYÊN GIỎ HÀNG (/api/cart) =================
+# ================= MODULE CART =================
 
 @app.route('/api/cart', methods=['GET'])
 @jwt_required()
@@ -1050,25 +1048,30 @@ def api_clear_cart():
 @jwt_required()
 def api_checkout_cart():
     try:
-        # Bốc ngầm danh tính UserID trực tiếp từ chữ ký bọc thép của mã JWT Token
         user_id = get_jwt_identity()
         data = get_clean_json()
+        if not data: return error_response("Vui lòng gửi dữ liệu thanh toán", 400)
         
-        # Frontend chỉ cần gửi lên đúng 3 tham số thô này (hoặc để trống mặc định)
-        payment_method = data.get('payment_method') or data.get('paymentmethod') or 'COD'
+        payment_method = data.get('paymentmethod') or data.get('payment_method') or 'COD'
         note = data.get('note') or ""
-        voucher_code = data.get('voucher_code') or data.get('vouchercode') or None
+        voucher_code = data.get('vouchercode') or data.get('voucher_code') or None
         
-        # Kích hoạt trạm xử lý bốc dữ liệu tự động ở tầng Service
+        # Hứng trọn vẹn 3 trường FE yêu cầu (Hỗ trợ cả camelCase lẫn snake_case)
+        shipping_name = data.get('shippingname') or data.get('shipping_name') or data.get('fullname')
+        shipping_phone = data.get('shippingphone') or data.get('shipping_phone') or data.get('phone')
+        shipping_address = data.get('shippingaddress') or data.get('shipping_address') or data.get('address')
+        
         is_success, msg, result = checkout_cart(
             user_id=user_id,
             payment_method=payment_method,
+            shipping_name=shipping_name,
+            shipping_phone=shipping_phone,
+            shipping_address=shipping_address,
             note=note,
             voucher_code=voucher_code
         )
         
-        if is_success:
-            return jsonify(success_response(msg, result)), 200
+        if is_success: return jsonify(success_response(msg, result)), 200
         return error_response(msg, 400)
     except Exception as e:
         return server_error_response(e)
