@@ -1060,6 +1060,8 @@ def api_checkout_cart():
         shipping_name = data.get('shippingname') or data.get('shipping_name') or data.get('fullname')
         shipping_phone = data.get('shippingphone') or data.get('shipping_phone') or data.get('phone')
         shipping_address = data.get('shippingaddress') or data.get('shipping_address') or data.get('address')
+
+        print(f"🚨 [DEBUG CHECKOUT TỪ FE]: Name='{shipping_name}' | Phone='{shipping_phone}' | Address='{shipping_address}'")
         
         is_success, msg, result = checkout_cart(
             user_id=user_id,
