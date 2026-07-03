@@ -154,35 +154,39 @@ def get_order_details(order_id, user_id, role_name):
     finally:
         if conn: conn.close()
 
-def create_order(user_id, shop_id, shipping_address, payment_method, items_list):
+def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_phone, note, payment_method, items_list):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối CSDL", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Nếu thiếu Tên/SĐT, bốc từ profile của User bù vào
+        if not shipping_name or not shipping_phone or not shipping_address:
+            cursor.execute("SELECT FullName, PhoneNumber, Address FROM Users WHERE UserID = %s;", (user_id,))
+            u = cursor.fetchone()
+            if u:
+                shipping_name = shipping_name or u['fullname']
+                shipping_phone = shipping_phone or u['phonenumber']
+                shipping_address = shipping_address or u['address']
+
         total_amount = 0
         valid_items = []
-        
-        # [BÍ KÍP TỐI THƯỢNG]: Sắp xếp ProductID theo thứ tự từ điển để vĩnh viễn triệt tiêu Deadlock!
         items_list = sorted(items_list, key=lambda x: str(x['ProductID']))
         
         for item in items_list:
             product_id_str = str(item['ProductID']).strip()
             buy_qty = int(item['Quantity'])
             
-            cursor.execute("""
-                SELECT ProductName, Price, StockQuantity, ShopID::text AS shopid, IsActive 
-                FROM Products WHERE ProductID = %s FOR UPDATE;
-            """, (product_id_str,))
+            cursor.execute("SELECT ProductName, Price, StockQuantity, ShopID::text AS shopid, IsActive FROM Products WHERE ProductID = %s FOR UPDATE;", (product_id_str,))
             product = cursor.fetchone()
             
-            # Ép tường minh str(product['shopid'])
             if not product or str(product['shopid']) != str(shop_id) or not product['isactive']:
                 conn.rollback()
-                return False, f"Sản phẩm (ID: {product_id_str}) không tồn tại, đã khóa hoặc không thuộc shop này", None
+                return False, f"Sản phẩm (ID: {product_id_str}) không tồn tại hoặc đã khóa", None
                 
             if int(product['stockquantity']) < buy_qty:
                 conn.rollback()
-                return False, f"Sản phẩm '{product['productname']}' không đủ số lượng trong kho", None
+                return False, f"Sản phẩm '{product['productname']}' không đủ hàng trong kho", None
                 
             unit_price = float(product['price'])
             total_amount += unit_price * buy_qty
@@ -191,36 +195,24 @@ def create_order(user_id, shop_id, shipping_address, payment_method, items_list)
         payment_status = 'Đã thanh toán' if payment_method == 'Chuyển khoản' else 'Chưa thanh toán'
 
         sql_insert_order = """
-            INSERT INTO Orders (UserID, ShopID, TotalAmount, ShippingAddress, PaymentMethod, Status, PaymentStatus)
-            VALUES (%s, %s, %s, %s, %s, 'Chờ xác nhận', %s)
+            INSERT INTO Orders (UserID, ShopID, TotalAmount, ShippingAddress, ShippingName, ShippingPhone, Note, PaymentMethod, Status, PaymentStatus)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Chờ xác nhận', %s)
             RETURNING OrderID::text AS "OrderID", OrderDate AS "OrderDate", Status AS "Status", PaymentMethod AS "PaymentMethod", PaymentStatus AS "PaymentStatus";
         """
-        cursor.execute(sql_insert_order, (str(user_id), str(shop_id), total_amount, shipping_address, payment_method, payment_status))
+        cursor.execute(sql_insert_order, (str(user_id), str(shop_id), total_amount, shipping_address, shipping_name, shipping_phone, note, payment_method, payment_status))
         new_order = cursor.fetchone()
         order_id_created = new_order['OrderID']
         
         for v_item in valid_items:
-            cursor.execute("""
-                INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice)
-                VALUES (%s, %s, %s, %s)
-            """, (order_id_created, v_item['ProductID'], v_item['Quantity'], v_item['UnitPrice']))
-            
-            cursor.execute("""
-                UPDATE Products 
-                SET StockQuantity = StockQuantity - %s, SoldQuantity = SoldQuantity + %s 
-                WHERE ProductID = %s
-            """, (v_item['Quantity'], v_item['Quantity'], v_item['ProductID']))
+            cursor.execute("INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice) VALUES (%s, %s, %s, %s)", (order_id_created, v_item['ProductID'], v_item['Quantity'], v_item['UnitPrice']))
+            cursor.execute("UPDATE Products SET StockQuantity = StockQuantity - %s, SoldQuantity = SoldQuantity + %s WHERE ProductID = %s", (v_item['Quantity'], v_item['Quantity'], v_item['ProductID']))
 
         conn.commit()
-        
         result_order = dict(new_order)
         result_order['TotalAmount'] = total_amount
         result_order['Items'] = valid_items
         return True, "Tạo đơn hàng thành công", result_order
         
-    except InvalidTextRepresentation:
-        if conn: conn.rollback()
-        return False, "Mã ID Cửa hàng hoặc Sản phẩm không đúng định dạng", None
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi xử lý đơn hàng: {str(e)}", None
