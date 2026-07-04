@@ -385,7 +385,7 @@ def api_toggle_category_status(category_id):
 # ================= MODULE PRODUCTS =================
 
 @app.route('/api/products', methods=['GET'])
-@jwt_required(optional=True) # <--- Thần chú: Khách vãng lai và Admin đều lọt
+@jwt_required(optional=True)
 def api_get_all_products():
     try:
         page = request.args.get('page', 1, type=int)
@@ -393,10 +393,15 @@ def api_get_all_products():
         if page < 1: page = 1
         if limit < 1: limit = 10
 
+        # [HỨNG THÊM SHOP_ID]: Cho phép FE gọi lọc riêng theo gian hàng
+        shop_id = request.args.get('shop_id') or request.args.get('shopid')
+
         claims = get_jwt()
         role_name = claims.get('rolename') if claims else None
+        user_id = get_jwt_identity() if claims else None
 
-        is_success, message, result = get_all_products(page, limit, role_name)
+        # Truyền thêm shop_id và user_id vào tầng Service
+        is_success, message, result = get_all_products(page, limit, role_name, shop_id, user_id)
         if is_success:
             response_payload = {
                 "status": "success", "message": message, "data": result["products"],
