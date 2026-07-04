@@ -41,7 +41,7 @@ from users_service import get_all_roles, assign_role, get_all_users, get_user_pr
 from stats_service import get_total_revenue, get_top_products, get_order_status_breakdown, get_revenue_by_shop, get_revenue_by_category
 
 # Module Chat
-from chat_service import get_chat_history, send_message
+from chat_service import get_chat_history, send_message, get_conversations
 
 # Module Cart
 from cart_service import get_cart, clear_cart, checkout_cart, add_item, update_item_qty, delete_item
@@ -917,12 +917,27 @@ def api_get_revenue_by_category():
     
 # ================= MODULE CHAT & REAL-TIME SOCKET =================
 
+@app.route('/api/chat/rooms', methods=['GET'])
+@jwt_required()
+def api_get_chat_rooms():
+    """API bổ sung: Lấy danh sách hộp thư bên trái (Inbox List)"""
+    try:
+        token_user_id = get_jwt_identity()
+        role_name = get_jwt().get('rolename')
+        shop_id = request.args.get('shop_id') or request.args.get('shopid')
+        
+        is_success, msg, data = get_conversations(token_user_id, role_name, shop_id)
+        if is_success: return jsonify(success_response(msg, data)), 200
+        return error_response(msg, 403 if "quyền" in msg else 400)
+    except Exception as e: return server_error_response(e)
+
+
 @app.route('/api/chat/history', methods=['GET'])
 @jwt_required()
 def api_get_chat_history():
     try:
-        user_id_param = request.args.get('user_id')
-        shop_id_raw = request.args.get('shop_id')
+        user_id_param = request.args.get('user_id') or request.args.get('userid')
+        shop_id_raw = request.args.get('shop_id') or request.args.get('shopid')
         
         if not user_id_param or not shop_id_raw: 
             return error_response("Vui lòng truyền đủ user_id và shop_id", 400)
@@ -930,7 +945,6 @@ def api_get_chat_history():
         token_user_id = get_jwt_identity()
         role_name = get_jwt().get('rolename')
 
-        # [RBAC ĐỘNG]: Khách hàng cấm xem trộm chat của người khác
         if role_name == 'Customer' and str(user_id_param).strip() != str(token_user_id):
             return error_response("Bạn không có quyền xem lịch sử hội thoại này", 403)
 
@@ -954,16 +968,16 @@ def api_send_message():
             file_image = None
         else:
             form_data = {k.lower(): v.strip() for k, v in request.form.items()}
-            file_image = request.files.get('image_file')
+            file_image = request.files.get('image_file') or request.files.get('image')
 
         token_user_id = get_jwt_identity()
         role_name = get_jwt().get('rolename')
         
-        shop_id_str = form_data.get('shopid')
-        target_user_id = form_data.get('userid') 
+        # [HỨNG ĐA DẠNG KEY]: Hỗ trợ cả shopid lẫn shop_id
+        shop_id_str = form_data.get('shopid') or form_data.get('shop_id')
+        target_user_id = form_data.get('userid') or form_data.get('user_id')
         content = form_data.get('content', '') 
 
-        # [RBAC ĐỘNG]
         if role_name == 'Customer':
             sender_role = 'User'
             chat_user_id = token_user_id 
@@ -972,13 +986,12 @@ def api_send_message():
             chat_user_id = target_user_id 
 
         if not shop_id_str or not chat_user_id: 
-            return error_response("Thiếu thông tin định danh Cửa hàng hoặc Khách hàng", 400)
+            return error_response("Thiếu thông tin định danh Cửa hàng (shopid) hoặc Khách hàng (userid)", 400)
         if content == "" and not file_image: 
             return error_response("Nội dung tin nhắn không được để trống", 400)
 
         image_url = upload_image(file_image) if file_image else None
 
-        # Lưu Database
         is_success, msg, result = send_message(
             str(chat_user_id).strip(), 
             str(shop_id_str).strip(), 
@@ -990,7 +1003,6 @@ def api_send_message():
         )
         
         if is_success: 
-            # PHÉP THUẬT WS: Bắn realtime vào đúng kênh định danh chuỗi
             room_name = f"chat_{chat_user_id}_{shop_id_str}"
             socketio.emit('receive_message', result, room=room_name)
             return jsonify(success_response(msg, result)), 201
@@ -1060,8 +1072,6 @@ def api_checkout_cart():
         shipping_name = data.get('shippingname') or data.get('shipping_name') or data.get('fullname')
         shipping_phone = data.get('shippingphone') or data.get('shipping_phone') or data.get('phone')
         shipping_address = data.get('shippingaddress') or data.get('shipping_address') or data.get('address')
-
-        print(f"🚨 [DEBUG CHECKOUT TỪ FE]: Name='{shipping_name}' | Phone='{shipping_phone}' | Address='{shipping_address}'")
         
         is_success, msg, result = checkout_cart(
             user_id=user_id,
