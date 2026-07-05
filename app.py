@@ -941,13 +941,17 @@ def api_get_revenue_by_category():
 @app.route('/api/chat/rooms', methods=['GET'])
 @jwt_required()
 def api_get_chat_rooms():
-    """API bổ sung: Lấy danh sách hộp thư bên trái (Inbox List)"""
+    """API bổ sung: Lấy danh sách hộp thư bên trái (Hỗ trợ chèn phòng chat mới)"""
     try:
         token_user_id = get_jwt_identity()
         role_name = get_jwt().get('rolename')
         shop_id = request.args.get('shop_id') or request.args.get('shopid')
         
-        is_success, msg, data = get_conversations(token_user_id, role_name, shop_id)
+        # Hứng tham số khi bấm chat lần đầu
+        target_shop_id = request.args.get('target_shop_id') or request.args.get('targetshopid')
+        target_user_id = request.args.get('target_user_id') or request.args.get('targetuserid')
+        
+        is_success, msg, data = get_conversations(token_user_id, role_name, shop_id, target_shop_id, target_user_id)
         if is_success: return jsonify(success_response(msg, data)), 200
         return error_response(msg, 403 if "quyền" in msg else 400)
     except Exception as e: return server_error_response(e)
