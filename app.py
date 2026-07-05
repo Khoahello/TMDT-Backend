@@ -47,7 +47,7 @@ from chat_service import get_chat_history, send_message, get_conversations
 from cart_service import get_cart, clear_cart, checkout_cart, add_item, update_item_qty, delete_item
 
 # Module Permission
-from role_permission_service import get_all_permissions, create_role, update_role, delete_role, get_role_permissions, update_role_permissions, get_user_permissions
+from role_permission_service import get_all_permissions, create_role, update_role, delete_role, get_role_permissions, update_role_permissions, get_user_permissions, get_permission_matrix, update_permission_matrix
 
 
 load_dotenv() # Load biến môi trường từ file .env
@@ -1282,6 +1282,41 @@ def api_check_single_permission():
             "Kiểm tra trạng thái quyền hạn thành công", 
             {"permission": perm_key, "has_permission": has_permission}
         )), 200
+    except Exception as e: return server_error_response(e)
+
+# ================= NÂNG CẤP API CHO GIAO DIỆN MA TRẬN PHÂN QUYỀN =================
+
+@app.route('/api/permissions/matrix', methods=['GET'])
+@jwt_required()
+def api_get_permission_matrix():
+    """API cho FE vẽ bảng Cấu hình phân quyền"""
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Quyền tối cao Admin mới được truy cập ma trận phân quyền!", 403)
+            
+        is_success, msg, data = get_permission_matrix()
+        return jsonify(success_response(msg, data)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/permissions/matrix', methods=['PUT'])
+@jwt_required()
+def api_update_permission_matrix():
+    """API xử lý nút 'Lưu cấu hình quyền' từ FE"""
+    try:
+        claims = get_jwt()
+        if claims.get('rolename') != 'Admin':
+            return error_response("Yêu cầu quyền Admin để chỉnh sửa cấu hình hệ thống!", 403)
+            
+        data = get_clean_json()
+        matrix_payload = data.get('matrix') if data else None
+        
+        if not matrix_payload:
+            return error_response("Vui lòng gửi cấu hình ma trận (key: matrix)", 400)
+            
+        is_success, msg, _ = update_permission_matrix(matrix_payload)
+        return jsonify(success_response(msg)), 200 if is_success else error_response(msg, 400)
     except Exception as e: return server_error_response(e)
 
 # ================= ĐỘNG CƠ KHỞI CHẠY SERVER =================
