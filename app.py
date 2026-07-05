@@ -69,14 +69,13 @@ jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ================= MODULE AUTH =================
+
 @app.route('/api/auth/register', methods=['POST'])
 def api_register():
     try:
-        data = get_clean_json() # Ép toàn bộ Key về chữ thường
-        if not data:
-            return error_response("Vui lòng gửi dữ liệu", 400)
+        data = get_clean_json() 
+        if not data: return error_response("Vui lòng gửi dữ liệu", 400)
 
-        # Tự tin dùng key chữ thường để lấy dữ liệu
         fullname = data.get('fullname')
         email = data.get('email')
         password = data.get('password')
@@ -86,22 +85,46 @@ def api_register():
         if not fullname or not email or not password or not phone or not address:
             return error_response("Vui lòng điền đầy đủ tất cả thông tin (Tên, Email, Mật khẩu, SĐT, Địa chỉ)", 400)
             
+        from auth_service import register_user
         is_success, message, result_data = register_user(fullname, email, password, phone, address)
         
         if is_success:
+            # Thành công bước 1 -> Trả về 200 báo FE bắt buộc điều hướng sang form nhập OTP kích hoạt
             return jsonify(success_response(message, result_data)), 200
         else:
             return error_response(message, 400)
+    except Exception as e: 
+        return server_error_response(e)
+
+
+@app.route('/api/auth/register-verify', methods=['POST'])
+def api_register_verify():
+    """API xác thực OTP: Nhận reg_token và otp từ FE để ghi chính thức vào DB"""
+    try:
+        data = get_clean_json()
+        if not data: return error_response("Vui lòng cung cấp dữ liệu xác thực", 400)
+        
+        reg_token = data.get('reg_token') or data.get('regtoken')
+        otp = data.get('otp')
+        
+        if not reg_token or not otp:
+            return error_response("Vui lòng điền đủ Mã OTP và Mã phiên xác thực (reg_token)", 400)
             
+        from auth_service import verify_register_otp
+        is_success, msg, result_data = verify_register_otp(reg_token, otp)
+        
+        if is_success:
+            return jsonify(success_response(msg, result_data)), 201
+        return error_response(msg, 400)
     except Exception as e:
         return server_error_response(e)
+
 
 @app.route('/api/auth/login', methods=['POST'])
 def api_login():
     try:
         data = get_clean_json()
-        if not data:
-            return error_response("Vui lòng gửi dữ liệu", 400)
+        if not data: return error_response("Vui lòng gửi dữ liệu", 400)
 
         email = data.get('email')
         password = data.get('password')
@@ -115,33 +138,25 @@ def api_login():
             return jsonify(success_response(message, result_data)), 200
         else:
             return error_response(message, 400)
-            
-    except Exception as e:
+    except Exception as e: 
         return server_error_response(e)
     
 @app.route('/api/auth/change-password', methods=['POST'])
-@jwt_required() # <--- Yêu cầu bắt buộc phải có thẻ JWT
+@jwt_required() 
 def api_change_password():
     try:
         data = get_clean_json()
         if not data: return error_response("Vui lòng gửi dữ liệu", 400)
         
-        # --- BẢO MẬT TUYỆT ĐỐI ---
-        # Bóc UserID trực tiếp từ thẻ JWT của người đang đăng nhập, không cần truyền Email nữa
         user_id = get_jwt_identity()
-        
-        # Đề phòng FE gửi old_password hoặc oldpassword
         old_password = data.get('old_password') or data.get('oldpassword')
         new_password = data.get('new_password') or data.get('newpassword')
         
         if not old_password or not new_password:
             return error_response("Thiếu thông tin mật khẩu cũ hoặc mật khẩu mới", 400)
             
-        # Truyền user_id xuống Tầng Service
         is_success, msg, _ = change_password(user_id, old_password, new_password)
-        
         return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
-        
     except Exception as e: 
         return server_error_response(e)
 

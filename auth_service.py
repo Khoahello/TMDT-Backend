@@ -4,7 +4,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import random
 from datetime import datetime, timedelta
 import os
-from flask_jwt_extended import create_access_token
+from flask_jwt_extended import create_access_token, decode_token
 
 import urllib.request
 import urllib.error
@@ -20,41 +20,105 @@ def _get_role_uuid(conn, role_name):
         raise ValueError(f"CRITICAL ERROR: Trong Database không tồn tại Role mang tên '{role_name}'!")
     return str(res[0])
 
+
 def register_user(fullname, email, password, phone, address):
+    """Bước 1 (Stateless): Kiểm tra Email sạch -> Bắn mail -> Đóng gói thông tin vào Thẻ tạm (Không lưu DB)"""
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
 
     try:
         email = email.lower().strip()
+        cursor = conn.cursor()
         
-        # 1. TRUY VẤN ĐỘNG: Bốc UUID của Customer từ DB ra, dẹp bỏ mọi sự gán cứng!
-        customer_role_uuid = _get_role_uuid(conn, 'Customer')
-
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # 1. Vì DB giờ đây chỉ chứa tài khoản THẬT đã xác thực, ta chỉ cần check email đã tồn tại chưa là xong!
+        cursor.execute("SELECT UserID FROM Users WHERE Email = %s;", (email,))
+        if cursor.fetchone():
+            return False, "Email này đã có người sở hữu trên hệ thống!", None
+            
+        otp = str(random.randint(100000, 999999))
         hashed_password = generate_password_hash(password)
         
-        sql_query = """
-            INSERT INTO Users (FullName, Email, PasswordHash, PhoneNumber, Address, RoleID) 
-            VALUES (%s, %s, %s, %s, %s, %s) 
-            RETURNING UserID, FullName, Email, PhoneNumber, Address, RoleID;
-        """
-        cursor.execute(sql_query, (fullname, email, hashed_password, phone, address, customer_role_uuid))
-        new_user = cursor.fetchone()
-        
-        # Chuẩn hóa kiểu chuỗi cho JSON
-        new_user['userid'] = str(new_user['userid'])
-        new_user['roleid'] = str(new_user['roleid'])
+        # 2. Bắn hỏa tiễn OTP qua cổng Brevo
+        mail_sent = send_otp_email(email, otp, email_type="register")
+        if not mail_sent:
+            return False, "Hệ thống Mail đang gặp sự cố kết nối, vui lòng thử lại sau!", None
 
-        conn.commit()
-        return True, "Đăng ký tài khoản thành công!", new_user
+        # 3. ⚡️ PHÉP THUẬT: Đóng gói toàn bộ thông tin tạm vào một thẻ JWT có hạn 15 phút
+        temp_payload = {
+            "fullname": fullname.strip(),
+            "email": email,
+            "password_hash": hashed_password,
+            "phone": phone.strip(),
+            "address": address.strip(),
+            "otp": otp,
+            "purpose": "registration_verify"
+        }
         
-    except psycopg2.errors.UniqueViolation:
-        if conn: conn.rollback()
-        return False, "Email này đã được đăng ký", None
+        reg_token = create_access_token(
+            identity=email,
+            additional_claims=temp_payload,
+            expires_delta=timedelta(minutes=15)
+        )
+        
+        # Trả thẻ tạm cho FE cầm, Database sạch bóng 100%!
+        return True, f"Mã OTP đã được gửi đến {email}. Vui lòng xác thực trong 15 phút!", {
+            "email": email,
+            "reg_token": reg_token
+        }
+            
+    except Exception as e:
+        return False, f"Lỗi hệ thống: {str(e)}", None
+    finally:
+        if conn: conn.close()
+
+
+def verify_register_otp(reg_token, input_otp):
+    """Bước 2 (Ghi đĩa thật): Giải mã Thẻ tạm -> So khớp OTP -> INSERT chính thức vào DB"""
+    conn = get_db_connection()
+    if not conn: return False, "Lỗi kết nối Database", None
+    try:
+        # 1. Giải mã thẻ tạm FE gửi lên (Nếu quá 15 phút tự nổ lỗi hết hạn)
+        try:
+            decoded = decode_token(reg_token)
+        except Exception:
+            return False, "Phiên xác thực đã hết hạn (quá 15 phút) hoặc không hợp lệ. Vui lòng đăng ký lại!", None
+            
+        if decoded.get("purpose") != "registration_verify":
+            return False, "Mã thông báo không hợp lệ cho thao tác này!", None
+
+        # 2. Đối chiếu mã OTP
+        saved_otp = decoded.get("otp")
+        if str(saved_otp) != str(input_otp).strip():
+            return False, "Mã OTP không chính xác, vui lòng kiểm tra lại!", None
+
+        # 3. ⚡️ OTP KHỚP -> TRÍCH XUẤT DỮ LIỆU SẠCH VÀ GHI ĐĨA CHÍNH THỨC VÀO POSTGRESQL
+        email = decoded.get("email")
+        fullname = decoded.get("fullname")
+        hashed_password = decoded.get("password_hash")
+        phone = decoded.get("phone")
+        address = decoded.get("address")
+
+        customer_role_uuid = _get_role_uuid(conn, 'Customer')
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Kiểm tra nháy cuối cùng đề phòng 2 tab đăng ký cùng lúc
+        cursor.execute("SELECT UserID FROM Users WHERE Email = %s;", (email,))
+        if cursor.fetchone():
+            return False, "Tài khoản với Email này vừa được kích hoạt thành công!", None
+
+        sql_insert = """
+            INSERT INTO Users (FullName, Email, PasswordHash, PhoneNumber, Address, RoleID, IsActive) 
+            VALUES (%s, %s, %s, %s, %s, %s, TRUE) 
+            RETURNING UserID::text AS userid, FullName AS fullname, Email AS email, PhoneNumber AS phone, Address AS address, RoleID::text AS roleid;
+        """
+        cursor.execute(sql_insert, (fullname, email, hashed_password, phone, address, customer_role_uuid))
+        new_user = cursor.fetchone()
+        conn.commit()
+        
+        return True, "🎉 Đăng ký và kích hoạt tài khoản thành công!", dict(new_user)
     except Exception as e:
         if conn: conn.rollback()
-        print("Lỗi SQL Register:", str(e))
-        return False, f"Lỗi cơ sở dữ liệu: {str(e)}", None
+        return False, f"Lỗi ghi nhận tài khoản: {str(e)}", None
     finally:
         if conn: conn.close()
 
@@ -64,7 +128,6 @@ def login_user(email, password):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # 1. TRUY VẤN THÔNG TIN USER CƠ BẢN
         sql_user = """
             SELECT u.UserID::text AS userid, u.FullName AS fullname, u.Email AS email, 
                    u.PhoneNumber AS phone, u.Address AS address, u.AvatarURL AS avatar,
@@ -78,15 +141,14 @@ def login_user(email, password):
         if not user:
             return False, "Email đăng nhập không tồn tại trong hệ thống!", None
             
+        # [KỊCH BẢN KIỂM TOÁN]: Nếu IsActive đang là False, chặn không cho đăng nhập
         if not user['isactive']:
-            return False, "Tài khoản của bạn đang bị tạm khóa!", None
+            return False, "Tài khoản chưa được kích hoạt hoặc đang bị khóa. Vui lòng liên hệ Admin!", None
             
-        # Kiểm tra mật khẩu (dùng werkzeug.security hay bcrypt của ông)
         from werkzeug.security import check_password_hash
         if not check_password_hash(user['passwordhash'], password):
             return False, "Mật khẩu không chính xác!", None
 
-        # 2. TẠO PAYLOAD TRẢ VỀ CHO FRONTEND
         user_payload = {
             "userid": user['userid'],
             "fullname": user['fullname'],
@@ -96,10 +158,9 @@ def login_user(email, password):
             "avatar": user['avatar'],
             "roleid": user['roleid'],
             "rolename": user['rolename'],
-            "shop": None  # Mặc định khách hàng thường sẽ không có shop
+            "shop": None
         }
 
-        # 3. ⚡️ NGHIỆP VỤ THẦN THÁNH: NẾU LÀ MANAGER -> ĐI TÌM SHOP CỦA HỌ NẠP VÀO!
         if user['rolename'] == 'Manager':
             sql_shop = """
                 SELECT ShopID::text AS shopid, ShopName AS shopname, 
@@ -109,25 +170,15 @@ def login_user(email, password):
             """
             cursor.execute(sql_shop, (user['userid'],))
             owned_shop = cursor.fetchone()
-            
             if owned_shop:
                 user_payload['shop'] = dict(owned_shop)
 
-        # 4. TẠO TOKEN JWT (Nạp cả rolename vào claim để các API sau dùng)
-        from flask_jwt_extended import create_access_token
         access_token = create_access_token(
             identity=user['userid'],
-            additional_claims={
-                "roleid": user['roleid'],
-                "rolename": user['rolename']
-            }
+            additional_claims={"roleid": user['roleid'], "rolename": user['rolename']}
         )
 
-        return True, "Đăng nhập thành công!", {
-            "access_token": access_token,
-            "user": user_payload
-        }
-        
+        return True, "Đăng nhập thành công!", {"access_token": access_token, "user": user_payload}
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi hệ thống: {str(e)}", None
@@ -135,39 +186,8 @@ def login_user(email, password):
         if conn: conn.close()
 
 
-def change_password(user_id, old_password, new_password):
-    conn = get_db_connection()
-    if not conn: return False, "Lỗi kết nối Database", None
-
-    try:
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("SELECT PasswordHash FROM Users WHERE UserID = %s", (str(user_id),))
-        user = cursor.fetchone()
-        
-        if not user: return False, "Người dùng không tồn tại", None
-            
-        saved_hash = user.get('passwordhash') or user.get('PasswordHash')
-        if not check_password_hash(saved_hash, old_password):
-            return False, "Mật khẩu hiện tại không đúng", None
-            
-        new_hash = generate_password_hash(new_password)
-        cursor.execute("UPDATE Users SET PasswordHash = %s, UpdatedAt = CURRENT_TIMESTAMP WHERE UserID = %s", (new_hash, str(user_id)))
-        conn.commit()
-        return True, "Cập nhật mật khẩu mới thành công", None
-    except Exception as e:
-        if conn: conn.rollback()
-        return False, str(e), None
-    finally:
-        if conn: conn.close()
-
-import urllib.request
-import urllib.error
-import json
-import os
-
-# ================= HÀM GỬI MAIL BREVO GLOBAL BẰNG THƯ VIỆN LÕI =================
-def send_otp_email(receiver_email, otp):
-    """Bắn mail qua cổng REST API của Brevo bằng urllib. Miễn nhiễm 100% lỗi Gunicorn/Render."""
+def send_otp_email(receiver_email, otp, email_type="forgot"):
+    """Bắn mail qua cổng REST API của Brevo. Dynamic giao diện Đăng ký / Quên mật khẩu cực đẹp."""
     api_key = os.getenv("BREVO_API_KEY")
     sender_mail = os.getenv("BREVO_SENDER_EMAIL")
 
@@ -183,16 +203,20 @@ def send_otp_email(receiver_email, otp):
         "content-type": "application/json"
     }
 
+    # BỘ DỊCH TIÊU ĐỀ THEO BẢN CHẤT NGHIỆP VỤ
+    title = "XÁC THỰC ĐĂNG KÝ" if email_type == "register" else "KHÔI PHỤC MẬT KHẨU"
+    desc = "Chào mừng bạn đến với Sàn TMDT DUE. Vui lòng nhập mã xác thực OTP dưới đây để hoàn tất quy trình kích hoạt tài khoản đăng ký:" if email_type == "register" else "Hệ thống nhận được yêu cầu đặt lại mật khẩu truy cập. Vui lòng nhập mã xác thực bảo mật dưới đây:"
+
     html_content = f"""
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 500px; margin: 0 auto; padding: 30px; border: 1px solid #e2e8f0; border-radius: 20px; background-color: #ffffff; box-shadow: 0 10px 25px rgba(0,0,0,0.05);">
         <div style="text-align: center; margin-bottom: 25px;">
             <span style="font-size: 22px; font-weight: 900; color: #0f172a; letter-spacing: -0.5px;">TECH</span>
             <span style="font-size: 22px; font-weight: 900; color: #2563eb; letter-spacing: -0.5px;">TONIC</span>
-            <p style="color: #64748b; font-size: 13px; margin-top: 5px; font-weight: 600;">HỆ THỐNG XÁC THỰC SÀN TMDT DUE</p>
+            <p style="color: #64748b; font-size: 13px; margin-top: 5px; font-weight: 600;">{title} SÀN TMDT DUE</p>
         </div>
         
         <p style="color: #334155; font-size: 14px;">Xin chào,</p>
-        <p style="color: #334155; font-size: 14px; line-height: 1.6;">Bạn (hoặc ai đó) vừa yêu cầu đặt lại mật khẩu truy cập. Vui lòng nhập mã xác thực bảo mật dưới đây:</p>
+        <p style="color: #334155; font-size: 14px; line-height: 1.6;">{desc}</p>
         
         <div style="text-align: center; margin: 30px 0;">
             <div style="display: inline-block; font-size: 34px; font-weight: 900; letter-spacing: 10px; color: #2563eb; background-color: #f1f5f9; padding: 14px 32px; border-radius: 16px; border: 2px solid #cbd5e1;">
@@ -207,127 +231,97 @@ def send_otp_email(receiver_email, otp):
     """
 
     payload = {
-        "sender": {
-            "name": "Sàn TMDT DUE",
-            "email": sender_mail
-        },
+        "sender": {"name": "Sàn TMDT DUE", "email": sender_mail},
         "to": [{"email": receiver_email}],
-        "subject": f"[{otp}] Mã xác thực khôi phục mật khẩu DUE",
+        "subject": f"[{otp}] Mã xác thực {title.lower()} sàn TMDT DUE",
         "htmlContent": html_content
     }
 
     try:
-        # 1. Đóng gói dữ liệu thành dạng Bytes (yêu cầu bắt buộc của urllib)
         data_bytes = json.dumps(payload).encode('utf-8')
-        
-        # 2. Khởi tạo một Request tiêu chuẩn của Python lõi
         req = urllib.request.Request(url, data=data_bytes, headers=headers, method='POST')
-        
-        # 3. Phóng gói tin đi và chờ phản hồi (timeout 10 giây để chống treo server)
         with urllib.request.urlopen(req, timeout=10) as response:
             status_code = response.getcode()
             if status_code in [200, 201, 202]:
-                print(f"🎉 [BREVO DISPATCH SUCCESS]: Đã bắn OTP tới -> {receiver_email}")
+                print(f"🎉 [BREVO DISPATCH SUCCESS]: Đã bắn OTP loại [{email_type}] tới -> {receiver_email}")
                 return True
-            else:
-                print(f"❌ [BREVO REJECTED]: HTTP Status {status_code}")
-                return False
-
-    except urllib.error.HTTPError as e:
-        error_info = e.read().decode('utf-8')
-        print(f"❌ [BREVO HTTP ERROR]: Code {e.code} - {error_info}")
-        return False
+            return False
     except Exception as e:
-        print(f"❌ [BREVO SYSTEM EXCEPTION]: {str(e)}")
+        print(f"❌ [BREVO EXCEPTION]: {str(e)}")
         return False
+
 
 def forgot_password(email):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
-
     try:
         email = email.lower().strip()
         cursor = conn.cursor()
-        cursor.execute("SELECT UserID FROM Users WHERE Email = %s", (email,))
+        cursor.execute("SELECT UserID FROM Users WHERE Email = %s AND IsActive = TRUE;", (email,))
         if not cursor.fetchone():
-            return False, "Email không tồn tại trong hệ thống", None
+            return False, "Email không tồn tại trong hệ thống hoặc chưa kích hoạt", None
             
         otp = str(random.randint(100000, 999999))
         expiry_time = datetime.now() + timedelta(minutes=15)
         
-        cursor.execute("UPDATE Users SET ResetOTP = %s, OTPExpiry = %s WHERE Email = %s", (otp, expiry_time, email))
+        cursor.execute("UPDATE Users SET ResetOTP = %s, OTPExpiry = %s WHERE Email = %s;", (otp, expiry_time, email))
         conn.commit()
         
-        mail_sent = send_otp_email(email, otp)
-        
+        mail_sent = send_otp_email(email, otp, email_type="forgot")
         if mail_sent:
             return True, f"Mã khôi phục đã được gửi đến email {email}. Vui lòng kiểm tra hộp thư.", None
         else:
-            # ROLLBACK KHI GẶP SỰ CỐ: Xóa sạch OTP vừa tạo để giữ nguyên vẹn CSDL
-            cursor.execute("UPDATE Users SET ResetOTP = NULL, OTPExpiry = NULL WHERE Email = %s", (email,))
+            cursor.execute("UPDATE Users SET ResetOTP = NULL, OTPExpiry = NULL WHERE Email = %s;", (email,))
             conn.commit()
-            return False, "Hệ thống gửi email đang gặp rào cản kết nối mạng. Vui lòng thử lại sau.", None
-            
+            return False, "Hệ thống gửi email đang gặp rào cản mạng. Vui lòng thử lại sau.", None
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi hệ thống: {str(e)}", None
     finally:
         if conn: conn.close()
 
+
 def verify_otp(email, otp):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
-
     try:
         email = email.lower().strip()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("SELECT ResetOTP, OTPExpiry FROM Users WHERE Email = %s", (email,))
+        cursor.execute("SELECT ResetOTP, OTPExpiry FROM Users WHERE Email = %s AND IsActive = TRUE;", (email,))
         user = cursor.fetchone()
-        
-        if not user: return False, "Email không tồn tại", None
+        if not user: return False, "Email không tồn tại hoặc tài khoản bị khóa", None
         
         saved_otp = user.get('resetotp') or user.get('ResetOTP')
         expiry = user.get('otpexpiry') or user.get('OTPExpiry')
-        
-        if not saved_otp or saved_otp != otp:
-            return False, "Mã xác thực không hợp lệ", None
-            
-        if expiry < datetime.now():
-            return False, "Mã xác thực đã hết hạn, vui lòng yêu cầu mã mới", None
-            
+        if not saved_otp or saved_otp != otp: return False, "Mã xác thực không hợp lệ", None
+        if expiry < datetime.now(): return False, "Mã xác thực đã hết hạn", None
         return True, "Mã xác thực hợp lệ. Vui lòng đặt mật khẩu mới.", None
-    except Exception as e:
-        return False, f"Lỗi kiểm tra OTP: {str(e)}", None
+    except Exception as e: return False, f"Lỗi kiểm tra OTP: {str(e)}", None
     finally:
         if conn: conn.close()
+
 
 def reset_password(email, otp, new_password):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
-
     try:
         email = email.lower().strip()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("SELECT ResetOTP, OTPExpiry FROM Users WHERE Email = %s", (email,))
+        cursor.execute("SELECT ResetOTP, OTPExpiry FROM Users WHERE Email = %s AND IsActive = TRUE;", (email,))
         user = cursor.fetchone()
-        
         if not user: return False, "Email không tồn tại", None
         
         saved_otp = user.get('resetotp') or user.get('ResetOTP')
         expiry = user.get('otpexpiry') or user.get('OTPExpiry')
-        
-        if saved_otp != otp:
-            return False, "Mã OTP không hợp lệ", None
-            
+        if saved_otp != otp: return False, "Mã OTP không hợp lệ", None
         if expiry < datetime.now():
-            cursor.execute("UPDATE Users SET ResetOTP = NULL, OTPExpiry = NULL, UpdatedAt = CURRENT_TIMESTAMP WHERE Email = %s", (email,))
+            cursor.execute("UPDATE Users SET ResetOTP = NULL, OTPExpiry = NULL WHERE Email = %s;", (email,))
             conn.commit()
-            return False, "Mã OTP đã hết hạn, vui lòng yêu cầu mã mới", None
+            return False, "Mã OTP đã hết hạn", None
             
         new_hash = generate_password_hash(new_password)
-        cursor.execute("UPDATE Users SET PasswordHash = %s, ResetOTP = NULL, OTPExpiry = NULL, UpdatedAt = CURRENT_TIMESTAMP WHERE Email = %s", (new_hash, email))
+        cursor.execute("UPDATE Users SET PasswordHash = %s, ResetOTP = NULL, OTPExpiry = NULL, UpdatedAt = CURRENT_TIMESTAMP WHERE Email = %s;", (new_hash, email))
         conn.commit()
-        
         return True, "Đổi mật khẩu thành công! Vui lòng đăng nhập lại.", None
     except Exception as e:
         if conn: conn.rollback()
