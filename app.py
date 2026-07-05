@@ -20,7 +20,7 @@ from error_handler import success_response, error_response, server_error_respons
 from upload_service import upload_image
 
 # Module Auth
-from auth_service import register_user, login_user, change_password, verify_otp, forgot_password, reset_password
+from auth_service import register_user, login_user, change_password, verify_otp, forgot_password, reset_password, verify_register_otp
 
 # Module Shops
 from shops_service import get_all_shops, get_shop_details, create_shop, update_shop, toggle_shop_status
@@ -85,11 +85,9 @@ def api_register():
         if not fullname or not email or not password or not phone or not address:
             return error_response("Vui lòng điền đầy đủ tất cả thông tin (Tên, Email, Mật khẩu, SĐT, Địa chỉ)", 400)
             
-        from auth_service import register_user
         is_success, message, result_data = register_user(fullname, email, password, phone, address)
         
         if is_success:
-            # Thành công bước 1 -> Trả về 200 báo FE bắt buộc điều hướng sang form nhập OTP kích hoạt
             return jsonify(success_response(message, result_data)), 200
         else:
             return error_response(message, 400)
@@ -110,7 +108,6 @@ def api_register_verify():
         if not reg_token or not otp:
             return error_response("Vui lòng điền đủ Mã OTP và Mã phiên xác thực (reg_token)", 400)
             
-        from auth_service import verify_register_otp
         is_success, msg, result_data = verify_register_otp(reg_token, otp)
         
         if is_success:
@@ -141,6 +138,7 @@ def api_login():
     except Exception as e: 
         return server_error_response(e)
     
+
 @app.route('/api/auth/change-password', methods=['POST'])
 @jwt_required() 
 def api_change_password():
@@ -160,6 +158,7 @@ def api_change_password():
     except Exception as e: 
         return server_error_response(e)
 
+
 @app.route('/api/auth/forgot-password', methods=['POST'])
 def api_forgot_password():
     try:
@@ -170,6 +169,7 @@ def api_forgot_password():
         is_success, msg, _ = forgot_password(email)
         return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
     except Exception as e: return server_error_response(e)
+
 
 @app.route('/api/auth/verify-otp', methods=['POST'])
 def api_verify_otp():
@@ -186,6 +186,7 @@ def api_verify_otp():
         is_success, msg, _ = verify_otp(email, otp)
         return jsonify(success_response(msg)) if is_success else error_response(msg, 400)
     except Exception as e: return server_error_response(e)
+
 
 @app.route('/api/auth/reset-password', methods=['POST'])
 def api_reset_password():

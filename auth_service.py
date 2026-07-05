@@ -30,7 +30,6 @@ def register_user(fullname, email, password, phone, address):
         email = email.lower().strip()
         cursor = conn.cursor()
         
-        # 1. Vì DB giờ đây chỉ chứa tài khoản THẬT đã xác thực, ta chỉ cần check email đã tồn tại chưa là xong!
         cursor.execute("SELECT UserID FROM Users WHERE Email = %s;", (email,))
         if cursor.fetchone():
             return False, "Email này đã có người sở hữu trên hệ thống!", None
@@ -38,12 +37,10 @@ def register_user(fullname, email, password, phone, address):
         otp = str(random.randint(100000, 999999))
         hashed_password = generate_password_hash(password)
         
-        # 2. Bắn hỏa tiễn OTP qua cổng Brevo
         mail_sent = send_otp_email(email, otp, email_type="register")
         if not mail_sent:
             return False, "Hệ thống Mail đang gặp sự cố kết nối, vui lòng thử lại sau!", None
 
-        # 3. ⚡️ PHÉP THUẬT: Đóng gói toàn bộ thông tin tạm vào một thẻ JWT có hạn 15 phút
         temp_payload = {
             "fullname": fullname.strip(),
             "email": email,
@@ -60,7 +57,6 @@ def register_user(fullname, email, password, phone, address):
             expires_delta=timedelta(minutes=15)
         )
         
-        # Trả thẻ tạm cho FE cầm, Database sạch bóng 100%!
         return True, f"Mã OTP đã được gửi đến {email}. Vui lòng xác thực trong 15 phút!", {
             "email": email,
             "reg_token": reg_token
@@ -77,7 +73,6 @@ def verify_register_otp(reg_token, input_otp):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
     try:
-        # 1. Giải mã thẻ tạm FE gửi lên (Nếu quá 15 phút tự nổ lỗi hết hạn)
         try:
             decoded = decode_token(reg_token)
         except Exception:
@@ -86,12 +81,10 @@ def verify_register_otp(reg_token, input_otp):
         if decoded.get("purpose") != "registration_verify":
             return False, "Mã thông báo không hợp lệ cho thao tác này!", None
 
-        # 2. Đối chiếu mã OTP
         saved_otp = decoded.get("otp")
         if str(saved_otp) != str(input_otp).strip():
             return False, "Mã OTP không chính xác, vui lòng kiểm tra lại!", None
 
-        # 3. ⚡️ OTP KHỚP -> TRÍCH XUẤT DỮ LIỆU SẠCH VÀ GHI ĐĨA CHÍNH THỨC VÀO POSTGRESQL
         email = decoded.get("email")
         fullname = decoded.get("fullname")
         hashed_password = decoded.get("password_hash")
@@ -101,7 +94,6 @@ def verify_register_otp(reg_token, input_otp):
         customer_role_uuid = _get_role_uuid(conn, 'Customer')
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Kiểm tra nháy cuối cùng đề phòng 2 tab đăng ký cùng lúc
         cursor.execute("SELECT UserID FROM Users WHERE Email = %s;", (email,))
         if cursor.fetchone():
             return False, "Tài khoản với Email này vừa được kích hoạt thành công!", None
@@ -122,6 +114,7 @@ def verify_register_otp(reg_token, input_otp):
     finally:
         if conn: conn.close()
 
+
 def login_user(email, password):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối cơ sở dữ liệu", None
@@ -141,11 +134,9 @@ def login_user(email, password):
         if not user:
             return False, "Email đăng nhập không tồn tại trong hệ thống!", None
             
-        # [KỊCH BẢN KIỂM TOÁN]: Nếu IsActive đang là False, chặn không cho đăng nhập
         if not user['isactive']:
             return False, "Tài khoản chưa được kích hoạt hoặc đang bị khóa. Vui lòng liên hệ Admin!", None
             
-        from werkzeug.security import check_password_hash
         if not check_password_hash(user['passwordhash'], password):
             return False, "Mật khẩu không chính xác!", None
 
@@ -186,6 +177,33 @@ def login_user(email, password):
         if conn: conn.close()
 
 
+# ================= HÀM ĐỔI MẬT KHẨU (ĐÃ ĐƯỢC KHÔI PHỤC BỌC THÉP) =================
+def change_password(user_id, old_password, new_password):
+    conn = get_db_connection()
+    if not conn: return False, "Lỗi kết nối Database", None
+
+    try:
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute("SELECT PasswordHash FROM Users WHERE UserID = %s AND IsActive = TRUE;", (str(user_id),))
+        user = cursor.fetchone()
+        
+        if not user: return False, "Người dùng không tồn tại hoặc tài khoản đang bị khóa", None
+            
+        saved_hash = user.get('passwordhash') or user.get('PasswordHash')
+        if not check_password_hash(saved_hash, old_password):
+            return False, "Mật khẩu hiện tại không đúng", None
+            
+        new_hash = generate_password_hash(new_password)
+        cursor.execute("UPDATE Users SET PasswordHash = %s, UpdatedAt = CURRENT_TIMESTAMP WHERE UserID = %s;", (new_hash, str(user_id)))
+        conn.commit()
+        return True, "Cập nhật mật khẩu mới thành công", None
+    except Exception as e:
+        if conn: conn.rollback()
+        return False, str(e), None
+    finally:
+        if conn: conn.close()
+
+
 def send_otp_email(receiver_email, otp, email_type="forgot"):
     """Bắn mail qua cổng REST API của Brevo. Dynamic giao diện Đăng ký / Quên mật khẩu cực đẹp."""
     api_key = os.getenv("BREVO_API_KEY")
@@ -203,7 +221,6 @@ def send_otp_email(receiver_email, otp, email_type="forgot"):
         "content-type": "application/json"
     }
 
-    # BỘ DỊCH TIÊU ĐỀ THEO BẢN CHẤT NGHIỆP VỤ
     title = "XÁC THỰC ĐĂNG KÝ" if email_type == "register" else "KHÔI PHỤC MẬT KHẨU"
     desc = "Chào mừng bạn đến với Sàn TMDT DUE. Vui lòng nhập mã xác thực OTP dưới đây để hoàn tất quy trình kích hoạt tài khoản đăng ký:" if email_type == "register" else "Hệ thống nhận được yêu cầu đặt lại mật khẩu truy cập. Vui lòng nhập mã xác thực bảo mật dưới đây:"
 
