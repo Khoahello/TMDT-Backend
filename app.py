@@ -20,7 +20,7 @@ from error_handler import success_response, error_response, server_error_respons
 from upload_service import upload_image
 
 # Module Auth
-from auth_service import register_user, login_user, change_password, verify_otp, forgot_password, reset_password, verify_register_otp
+from auth_service import request_register_otp, login_user, change_password, verify_otp, forgot_password, reset_password, finalize_registration, verify_register_otp_step2
 
 # Module Shops
 from shops_service import get_all_shops, get_shop_details, create_shop, update_shop, toggle_shop_status
@@ -70,51 +70,52 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ================= MODULE AUTH =================
 
-@app.route('/api/auth/register', methods=['POST'])
-def api_register():
+@app.route('/api/auth/register/request-otp', methods=['POST'])
+def api_register_step1():
+    """BƯỚC 1: Chỉ nhận Email -> Bắn OTP"""
     try:
         data = get_clean_json() 
-        if not data: return error_response("Vui lòng gửi dữ liệu", 400)
-
-        fullname = data.get('fullname')
         email = data.get('email')
+        if not email: return error_response("Vui lòng cung cấp Email", 400)
+
+        is_success, message, result_data = request_register_otp(email)
+        return jsonify(success_response(message, result_data)), 200 if is_success else error_response(message, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/auth/register/verify-otp', methods=['POST'])
+def api_register_step2():
+    """BƯỚC 2: Nhận OTP + Thẻ tạm -> Đối chiếu"""
+    try:
+        data = get_clean_json()
+        step1_token = data.get('step1_token') or data.get('step1token')
+        otp = data.get('otp')
+        
+        if not step1_token or not otp:
+            return error_response("Thiếu mã OTP hoặc Token bước 1", 400)
+            
+        is_success, msg, result_data = verify_register_otp_step2(step1_token, otp)
+        return jsonify(success_response(msg, result_data)), 200 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
+
+
+@app.route('/api/auth/register/finalize', methods=['POST'])
+def api_register_step3():
+    """BƯỚC 3: Điền nốt thông tin cá nhân + Thẻ thông hành -> Lưu Database"""
+    try:
+        data = get_clean_json()
+        step2_token = data.get('step2_token') or data.get('step2token')
+        fullname = data.get('fullname')
         password = data.get('password')
         phone = data.get('phonenumber') or data.get('phone')
         address = data.get('address')
-
-        if not fullname or not email or not password or not phone or not address:
-            return error_response("Vui lòng điền đầy đủ tất cả thông tin (Tên, Email, Mật khẩu, SĐT, Địa chỉ)", 400)
+        
+        if not all([step2_token, fullname, password, phone, address]):
+            return error_response("Vui lòng điền đủ Tên, Mật khẩu, SĐT, Địa chỉ và kèm theo Thẻ xác thực (step2_token)", 400)
             
-        is_success, message, result_data = register_user(fullname, email, password, phone, address)
-        
-        if is_success:
-            return jsonify(success_response(message, result_data)), 200
-        else:
-            return error_response(message, 400)
-    except Exception as e: 
-        return server_error_response(e)
-
-
-@app.route('/api/auth/register-verify', methods=['POST'])
-def api_register_verify():
-    """API xác thực OTP: Nhận reg_token và otp từ FE để ghi chính thức vào DB"""
-    try:
-        data = get_clean_json()
-        if not data: return error_response("Vui lòng cung cấp dữ liệu xác thực", 400)
-        
-        reg_token = data.get('reg_token') or data.get('regtoken')
-        otp = data.get('otp')
-        
-        if not reg_token or not otp:
-            return error_response("Vui lòng điền đủ Mã OTP và Mã phiên xác thực (reg_token)", 400)
-            
-        is_success, msg, result_data = verify_register_otp(reg_token, otp)
-        
-        if is_success:
-            return jsonify(success_response(msg, result_data)), 201
-        return error_response(msg, 400)
-    except Exception as e:
-        return server_error_response(e)
+        is_success, msg, result_data = finalize_registration(step2_token, fullname, password, phone, address)
+        return jsonify(success_response(msg, result_data)), 201 if is_success else error_response(msg, 400)
+    except Exception as e: return server_error_response(e)
 
 
 @app.route('/api/auth/login', methods=['POST'])

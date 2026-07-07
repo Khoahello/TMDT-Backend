@@ -21,96 +21,96 @@ def _get_role_uuid(conn, role_name):
     return str(res[0])
 
 
-def register_user(fullname, email, password, phone, address):
-    """Bước 1 (Stateless): Kiểm tra Email sạch -> Bắn mail -> Đóng gói thông tin vào Thẻ tạm (Không lưu DB)"""
+def request_register_otp(email):
+    """BƯỚC 1: Khách chỉ nhập Email -> Kiểm tra DB -> Bắn OTP -> Trả về step1_token"""
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
-
     try:
         email = email.lower().strip()
         cursor = conn.cursor()
         
         cursor.execute("SELECT UserID FROM Users WHERE Email = %s;", (email,))
         if cursor.fetchone():
-            return False, "Email này đã có người sở hữu trên hệ thống!", None
+            return False, "Email này đã được sử dụng trên hệ thống!", None
             
         otp = str(random.randint(100000, 999999))
-        hashed_password = generate_password_hash(password)
-        
         mail_sent = send_otp_email(email, otp, email_type="register")
         if not mail_sent:
-            return False, "Hệ thống Mail đang gặp sự cố kết nối, vui lòng thử lại sau!", None
+            return False, "Hệ thống Mail đang gặp sự cố, vui lòng thử lại sau!", None
 
-        temp_payload = {
-            "fullname": fullname.strip(),
-            "email": email,
-            "password_hash": hashed_password,
-            "phone": phone.strip(),
-            "address": address.strip(),
-            "otp": otp,
-            "purpose": "registration_verify"
-        }
+        # Bọc email và OTP vào thẻ tạm (15 phút)
+        temp_payload = {"email": email, "otp": otp, "purpose": "reg_step1"}
+        step1_token = create_access_token(identity=email, additional_claims=temp_payload, expires_delta=timedelta(minutes=15))
         
-        reg_token = create_access_token(
-            identity=email,
-            additional_claims=temp_payload,
-            expires_delta=timedelta(minutes=15)
-        )
-        
-        return True, f"Mã OTP đã được gửi đến {email}. Vui lòng xác thực trong 15 phút!", {
-            "email": email,
-            "reg_token": reg_token
-        }
-            
+        return True, f"Mã OTP đã được gửi đến {email}.", {"step1_token": step1_token}
     except Exception as e:
         return False, f"Lỗi hệ thống: {str(e)}", None
     finally:
         if conn: conn.close()
 
 
-def verify_register_otp(reg_token, input_otp):
-    """Bước 2 (Ghi đĩa thật): Giải mã Thẻ tạm -> So khớp OTP -> INSERT chính thức vào DB"""
+def verify_register_otp_step2(step1_token, input_otp):
+    """BƯỚC 2: FE gửi step1_token + OTP lên -> Giải mã đối chiếu -> Trả về step2_token (Thẻ thông hành)"""
+    try:
+        try:
+            decoded = decode_token(step1_token)
+        except Exception:
+            return False, "Phiên xác thực đã hết hạn (quá 15 phút). Vui lòng yêu cầu mã mới!", None
+            
+        if decoded.get("purpose") != "reg_step1":
+            return False, "Mã thông báo không hợp lệ!", None
+
+        saved_otp = decoded.get("otp")
+        if str(saved_otp) != str(input_otp).strip():
+            return False, "Mã OTP không chính xác!", None
+
+        # Khớp OTP -> Cấp cho FE một thẻ thông hành (Valid trong 30 phút) để điền Form thông tin
+        email = decoded.get("email")
+        verified_payload = {"email": email, "purpose": "reg_step2"}
+        step2_token = create_access_token(identity=email, additional_claims=verified_payload, expires_delta=timedelta(minutes=30))
+        
+        return True, "Xác thực Email thành công! Vui lòng điền thông tin cá nhân.", {"step2_token": step2_token}
+    except Exception as e:
+        return False, f"Lỗi xác thực: {str(e)}", None
+
+
+def finalize_registration(step2_token, fullname, password, phone, address):
+    """BƯỚC 3: FE nộp thông tin + step2_token -> Giải mã lấy Email -> Ghi đĩa DB"""
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
     try:
         try:
-            decoded = decode_token(reg_token)
+            decoded = decode_token(step2_token)
         except Exception:
-            return False, "Phiên xác thực đã hết hạn (quá 15 phút) hoặc không hợp lệ. Vui lòng đăng ký lại!", None
+            return False, "Thời gian điền form quá lâu (hết 30 phút). Vui lòng đăng ký lại từ đầu!", None
             
-        if decoded.get("purpose") != "registration_verify":
-            return False, "Mã thông báo không hợp lệ cho thao tác này!", None
-
-        saved_otp = decoded.get("otp")
-        if str(saved_otp) != str(input_otp).strip():
-            return False, "Mã OTP không chính xác, vui lòng kiểm tra lại!", None
-
+        if decoded.get("purpose") != "reg_step2":
+            return False, "Mã thông hành không hợp lệ!", None
+            
         email = decoded.get("email")
-        fullname = decoded.get("fullname")
-        hashed_password = decoded.get("password_hash")
-        phone = decoded.get("phone")
-        address = decoded.get("address")
-
+        hashed_password = generate_password_hash(password)
         customer_role_uuid = _get_role_uuid(conn, 'Customer')
+        
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
+        # Check an toàn lần cuối
         cursor.execute("SELECT UserID FROM Users WHERE Email = %s;", (email,))
         if cursor.fetchone():
-            return False, "Tài khoản với Email này vừa được kích hoạt thành công!", None
+            return False, "Tài khoản với Email này đã tồn tại!", None
 
         sql_insert = """
             INSERT INTO Users (FullName, Email, PasswordHash, PhoneNumber, Address, RoleID, IsActive) 
             VALUES (%s, %s, %s, %s, %s, %s, TRUE) 
-            RETURNING UserID::text AS userid, FullName AS fullname, Email AS email, PhoneNumber AS phone, Address AS address, RoleID::text AS roleid;
+            RETURNING UserID::text AS userid, FullName AS fullname, Email AS email;
         """
         cursor.execute(sql_insert, (fullname, email, hashed_password, phone, address, customer_role_uuid))
         new_user = cursor.fetchone()
         conn.commit()
         
-        return True, "🎉 Đăng ký và kích hoạt tài khoản thành công!", dict(new_user)
+        return True, "🎉 Đăng ký tài khoản thành công!", dict(new_user)
     except Exception as e:
         if conn: conn.rollback()
-        return False, f"Lỗi ghi nhận tài khoản: {str(e)}", None
+        return False, f"Lỗi lưu trữ tài khoản: {str(e)}", None
     finally:
         if conn: conn.close()
 
