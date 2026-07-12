@@ -108,14 +108,16 @@ def api_register_step3():
         fullname = data.get('fullname')
         password = data.get('password')
         phone = data.get('phonenumber') or data.get('phone')
-        address = data.get('address')
         
-        if not all([step2_token, fullname, password, phone, address]):
-            return error_response("Vui lòng điền đủ Tên, Mật khẩu, SĐT, Địa chỉ và kèm theo Thẻ xác thực (step2_token)", 400)
+        # Kiểm tra mớ data (Loại bỏ yêu cầu address)
+        if not all([step2_token, fullname, password, phone]):
+            return error_response("Vui lòng điền đủ Họ tên, Mật khẩu, Số điện thoại và Thẻ xác thực (step2_token)", 400)
             
-        is_success, msg, result_data = finalize_registration(step2_token, fullname, password, phone, address)
+        # Truyền xuống Service theo đúng kiến trúc 3 lớp
+        is_success, msg, result_data = finalize_registration(step2_token, fullname, password, phone)
         return jsonify(success_response(msg, result_data)), 201 if is_success else error_response(msg, 400)
-    except Exception as e: return server_error_response(e)
+    except Exception as e: 
+        return server_error_response(e)
 
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -621,16 +623,20 @@ def api_create_order():
 
         user_id = get_jwt_identity()
         shop_id = str(data.get('shopid')).strip()
-        payment_method = data.get('paymentmethod', 'COD') 
+        payment_method = data.get('paymentmethod') or data.get('payment_method') or 'COD'
         note = data.get('note') or ""
         items_raw = data.get('items', [])
         
-        shipping_address = data.get('shippingaddress') or data.get('shipping_address')
+        shipping_address = data.get('shippingaddress') or data.get('shipping_address') or data.get('address')
         shipping_name = data.get('shippingname') or data.get('shipping_name') or data.get('fullname')
         shipping_phone = data.get('shippingphone') or data.get('shipping_phone') or data.get('phone')
 
-        if not data.get('shopid') or not items_raw:
+        # 🚨 BỌC THÉP CỔNG VÀO: Bắt buộc FE phải truyền đủ mọi thứ!
+        if not shop_id or not items_raw:
             return error_response("Vui lòng điền đầy đủ ShopID và Danh sách món", 400)
+        
+        if not shipping_name or not shipping_phone or not shipping_address:
+            return error_response("Vui lòng nhập đầy đủ Tên người nhận, Số điện thoại và Địa chỉ giao hàng!", 400)
             
         items_list = []
         for item in items_raw:
@@ -1094,10 +1100,14 @@ def api_checkout_cart():
         note = data.get('note') or ""
         voucher_code = data.get('vouchercode') or data.get('voucher_code') or None
         
-        # Hứng trọn vẹn 3 trường FE yêu cầu (Hỗ trợ cả camelCase lẫn snake_case)
+        # Hứng trọn vẹn 3 trường FE yêu cầu
         shipping_name = data.get('shippingname') or data.get('shipping_name') or data.get('fullname')
         shipping_phone = data.get('shippingphone') or data.get('shipping_phone') or data.get('phone')
         shipping_address = data.get('shippingaddress') or data.get('shipping_address') or data.get('address')
+        
+        # 🚨 BỌC THÉP CỔNG VÀO: Bắt buộc FE phải truyền đủ 3 thông tin giao hàng!
+        if not shipping_name or not shipping_phone or not shipping_address:
+            return error_response("Vui lòng nhập đầy đủ Tên người nhận, Số điện thoại và Địa chỉ giao hàng!", 400)
         
         is_success, msg, result = checkout_cart(
             user_id=user_id,

@@ -74,8 +74,8 @@ def verify_register_otp_step2(step1_token, input_otp):
         return False, f"Lỗi xác thực: {str(e)}", None
 
 
-def finalize_registration(step2_token, fullname, password, phone, address):
-    """BƯỚC 3: FE nộp thông tin + step2_token -> Giải mã lấy Email -> Ghi đĩa DB"""
+def finalize_registration(step2_token, fullname, password, phone):
+    """BƯỚC 3: FE nộp thông tin + step2_token -> Giải mã lấy Email -> Ghi đĩa DB (Không cần Địa chỉ)"""
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Database", None
     try:
@@ -98,12 +98,13 @@ def finalize_registration(step2_token, fullname, password, phone, address):
         if cursor.fetchone():
             return False, "Tài khoản với Email này đã tồn tại!", None
 
+        # INSERT lược bỏ hoàn toàn cột Address (Database sẽ tự động nhận giá trị NULL)
         sql_insert = """
-            INSERT INTO Users (FullName, Email, PasswordHash, PhoneNumber, Address, RoleID, IsActive) 
-            VALUES (%s, %s, %s, %s, %s, %s, TRUE) 
+            INSERT INTO Users (FullName, Email, PasswordHash, PhoneNumber, RoleID, IsActive) 
+            VALUES (%s, %s, %s, %s, %s, TRUE) 
             RETURNING UserID::text AS userid, FullName AS fullname, Email AS email;
         """
-        cursor.execute(sql_insert, (fullname, email, hashed_password, phone, address, customer_role_uuid))
+        cursor.execute(sql_insert, (fullname, email, hashed_password, phone, customer_role_uuid))
         new_user = cursor.fetchone()
         conn.commit()
         
@@ -113,7 +114,6 @@ def finalize_registration(step2_token, fullname, password, phone, address):
         return False, f"Lỗi lưu trữ tài khoản: {str(e)}", None
     finally:
         if conn: conn.close()
-
 
 def login_user(email, password):
     conn = get_db_connection()

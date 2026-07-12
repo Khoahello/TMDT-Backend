@@ -66,27 +66,13 @@ def clear_cart(user_id):
         if conn: conn.close()
 
 def checkout_cart(user_id, payment_method='COD', shipping_name=None, shipping_phone=None, shipping_address=None, note=None, voucher_code=None):
-    """Nghiệp vụ Checkout bọc thép: Ưu tiên dữ liệu FE gửi -> Fallback lấy từ Profile -> Tách đơn theo Shop"""
+    """Nghiệp vụ Checkout: Lấy TRỰC TIẾP dữ liệu FE truyền xuống để lưu (Không lấy từ bảng Users)"""
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối cơ sở dữ liệu hệ thống", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # 1. SMART FALLBACK: Nếu FE gửi thiếu Tên/SĐT/Địa chỉ, tự động bốc từ bảng Users bù vào
-        if not shipping_name or not shipping_phone or not shipping_address:
-            cursor.execute("SELECT FullName, PhoneNumber, Address FROM Users WHERE UserID = %s AND IsActive = TRUE;", (user_id,))
-            user_prof = cursor.fetchone()
-            if not user_prof: return False, "Tài khoản không tồn tại hoặc đã bị khóa", None
-            
-            shipping_name = shipping_name or user_prof['fullname']
-            shipping_phone = shipping_phone or user_prof['phonenumber']
-            shipping_address = shipping_address or user_prof['address']
-
-        # Kiểm toán lần cuối: Nếu vẫn thiếu thông tin giao hàng thì từ chối đơn
-        if not shipping_name or not shipping_phone or not shipping_address:
-            return False, "Vui lòng cung cấp đầy đủ Tên người nhận, Số điện thoại và Địa chỉ giao hàng!", None
-
-        # 2. XỬ LÝ VOUCHER (NẾU CÓ)
+        # 1. XỬ LÝ VOUCHER (NẾU CÓ)
         discount_amount = 0
         if voucher_code:
             cursor.execute("SELECT VoucherCode, DiscountAmount, IsActive, ExpiryDate FROM Vouchers WHERE VoucherCode = %s;", (voucher_code.strip(),))
@@ -95,7 +81,7 @@ def checkout_cart(user_id, payment_method='COD', shipping_name=None, shipping_ph
                 return False, "Mã giảm giá (Voucher) không hợp lệ hoặc đã hết hạn!", None
             discount_amount = voucher['discountamount']
 
-        # 3. TRÍCH XUẤT SẢN PHẨM TRONG GIỎ
+        # 2. TRÍCH XUẤT SẢN PHẨM TRONG GIỎ
         cursor.execute("SELECT CartID FROM Cart WHERE UserID = %s;", (user_id,))
         cart_row = cursor.fetchone()
         if not cart_row: return False, "Giỏ hàng của bạn đang trống", None
@@ -114,7 +100,7 @@ def checkout_cart(user_id, payment_method='COD', shipping_name=None, shipping_ph
             if item['quantity'] > item['stockquantity']:
                 return False, "Một số sản phẩm trong giỏ không đủ tồn kho cung ứng!", None
 
-        # 4. GOM NHÓM SẢN PHẨM THEO CỬA HÀNG (SPLIT ORDER)
+        # 3. GOM NHÓM SẢN PHẨM THEO CỬA HÀNG (SPLIT ORDER)
         shop_orders = {}
         for item in items:
             shop_id = item['shopid']
@@ -126,7 +112,7 @@ def checkout_cart(user_id, payment_method='COD', shipping_name=None, shipping_ph
         created_orders = []
         voucher_applied = False
 
-        # 5. GHI ĐƠN HÀNG VÀO POSTGRESQL (LƯU TRỌN VẸN SHIPPING NAME, PHONE, ADDRESS)
+        # 4. GHI ĐƠN HÀNG VÀO POSTGRESQL
         for shop_id, order_data in shop_orders.items():
             sub_total = order_data['sub_total']
             current_discount = 0

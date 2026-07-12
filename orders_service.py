@@ -155,20 +155,12 @@ def get_order_details(order_id, user_id, role_name):
         if conn: conn.close()
 
 def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_phone, note, payment_method, items_list):
+    """Nghiệp vụ Tạo đơn nhanh (Buy Now): Nhận thẳng data giao hàng từ FE"""
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối CSDL", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Nếu thiếu Tên/SĐT, bốc từ profile của User bù vào
-        if not shipping_name or not shipping_phone or not shipping_address:
-            cursor.execute("SELECT FullName, PhoneNumber, Address FROM Users WHERE UserID = %s;", (user_id,))
-            u = cursor.fetchone()
-            if u:
-                shipping_name = shipping_name or u['fullname']
-                shipping_phone = shipping_phone or u['phonenumber']
-                shipping_address = shipping_address or u['address']
-
         total_amount = 0
         valid_items = []
         items_list = sorted(items_list, key=lambda x: str(x['ProductID']))
@@ -199,7 +191,11 @@ def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_pho
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Chờ xác nhận', %s)
             RETURNING OrderID::text AS "OrderID", OrderDate AS "OrderDate", Status AS "Status", PaymentMethod AS "PaymentMethod", PaymentStatus AS "PaymentStatus";
         """
-        cursor.execute(sql_insert_order, (str(user_id), str(shop_id), total_amount, shipping_address, shipping_name, shipping_phone, note, payment_method, payment_status))
+        cursor.execute(sql_insert_order, (
+            str(user_id), str(shop_id), total_amount, 
+            shipping_address, shipping_name, shipping_phone, note, 
+            payment_method, payment_status
+        ))
         new_order = cursor.fetchone()
         order_id_created = new_order['OrderID']
         
