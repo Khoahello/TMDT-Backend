@@ -7,7 +7,7 @@ from flask_cors import CORS
 import json
 
 # Thêm import thư viện JWT
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt, decode_token
+from flask_jwt_extended import JWTManager, create_access_token, create_refresh_token, jwt_required, get_jwt_identity, get_jwt, decode_token
 
 from flask_socketio import SocketIO, join_room, emit
 
@@ -62,8 +62,9 @@ CORS(app)
 # Cấu hình "Chìa khóa vạn năng" cho JWT (Tuyệt đối không để lộ)
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'chuoi_bi_mat_cua_ong_gia_123!@#')
 
-# Ép thẻ sống lâu 30 ngày để test Postman không bị văng
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(days=30)
+# Access Token sống 15 phút, Refresh Token sống 7 ngày
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=15)
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=7)
 
 jwt = JWTManager(app)
 
@@ -71,6 +72,27 @@ jwt = JWTManager(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # ================= MODULE AUTH =================
+
+@app.route('/api/auth/refresh', methods=['POST'])
+@jwt_required(refresh=True) # <--- Thần chú: Yêu cầu Refresh Token hợp lệ
+def api_refresh_token():
+    try:
+        # Bốc định danh và quyền từ thẻ Refresh cũ
+        user_id = get_jwt_identity()
+        claims = get_jwt()
+        
+        # Chỉ lấy lại đúng roleid và rolename để nạp vào thẻ mới
+        new_claims = {
+            "roleid": claims.get("roleid"),
+            "rolename": claims.get("rolename")
+        }
+        
+        # In ra 1 cái Access Token mới tinh (sống 15 phút nữa)
+        new_access_token = create_access_token(identity=user_id, additional_claims=new_claims)
+        
+        return jsonify(success_response("Đã làm mới token", {"access_token": new_access_token})), 200
+    except Exception as e:
+        return server_error_response(e)
 
 @app.route('/api/auth/register/request-otp', methods=['POST'])
 def api_register_step1():

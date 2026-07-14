@@ -4,7 +4,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import random
 from datetime import datetime, timedelta
 import os
-from flask_jwt_extended import create_access_token, decode_token
+from flask_jwt_extended import create_access_token, create_refresh_token, decode_token
 
 import urllib.request
 import urllib.error
@@ -164,12 +164,17 @@ def login_user(email, password):
             if owned_shop:
                 user_payload['shop'] = dict(owned_shop)
 
-        access_token = create_access_token(
-            identity=user['userid'],
-            additional_claims={"roleid": user['roleid'], "rolename": user['rolename']}
-        )
+        # ⚡️ NÂNG CẤP: CẤP CÙNG LÚC 2 LOẠI THẺ (ACCESS & REFRESH)
+        claims = {"roleid": user['roleid'], "rolename": user['rolename']}
+        
+        access_token = create_access_token(identity=user['userid'], additional_claims=claims)
+        refresh_token = create_refresh_token(identity=user['userid'], additional_claims=claims)
 
-        return True, "Đăng nhập thành công!", {"access_token": access_token, "user": user_payload}
+        return True, "Đăng nhập thành công!", {
+            "access_token": access_token,
+            "refresh_token": refresh_token, # <--- Nhả thêm cái này ra cho FE
+            "user": user_payload
+        }
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi hệ thống: {str(e)}", None
