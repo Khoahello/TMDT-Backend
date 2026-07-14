@@ -4,12 +4,12 @@ import math
 from data_manager import get_db_connection
 from psycopg2.errors import InvalidTextRepresentation
 
-# ================= 1. XEM DANH SÁCH SẢN PHẨM (CÓ LỌC THEO SHOP) =================
+# ================= 1. XEM DANH SÁCH SẢN PHẨM (NÂNG CẤP KÈM SHOP & RATING) =================
 def get_all_products(page=1, limit=10, role_name=None, shop_id=None, user_id=None):
     """
     - Admin: Thấy toàn bộ (cả ẩn lẫn hiện).
-    - Manager (nếu không truyền shop_id): Tự động lọc ra các sản phẩm thuộc các Cửa hàng do chính Manager này quản lý.
-    - Khách hàng / Truyền shop_id cụ thể: Chỉ thấy sản phẩm đang mở bán (IsActive = TRUE) của shop đó.
+    - Manager: Tự động lọc ra các sản phẩm thuộc các Cửa hàng do Manager quản lý.
+    - Khách hàng: Chỉ thấy sản phẩm đang mở bán (IsActive = TRUE).
     """
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Cơ sở dữ liệu", None
@@ -19,43 +19,47 @@ def get_all_products(page=1, limit=10, role_name=None, shop_id=None, user_id=Non
         where_conditions = []
         params = []
 
-        # 1. XỬ LÝ LỌC THEO TRẠNG THÁI ACTIVE
+        # Lọc trạng thái Active
         if role_name != 'Admin':
-            # Nếu là Manager đang xem shop của chính mình thì cho phép thấy cả món đang tạm ẩn
             if role_name == 'Manager' and not shop_id:
                 pass 
             else:
                 where_conditions.append("p.IsActive = TRUE")
 
-        # 2. XỬ LÝ LỌC THEO CỬA HÀNG (SHOP_ID)
+        # Lọc theo Shop
         if shop_id and shop_id.strip():
             where_conditions.append("p.ShopID = %s")
             params.append(shop_id.strip())
         elif role_name == 'Manager' and user_id:
-            # Tự động lọc sản phẩm thuộc quyền sở hữu của Manager đang đăng nhập
             where_conditions.append("p.ShopID IN (SELECT ShopID FROM Shops WHERE ManagerID = %s)")
             params.append(str(user_id))
 
         where_clause = "WHERE " + " AND ".join(where_conditions) if where_conditions else ""
 
-        # Đếm tổng số lượng để tính phân trang
+        # Đếm tổng số lượng
         count_sql = f"SELECT COUNT(*) FROM Products p {where_clause};"
         cursor.execute(count_sql, tuple(params))
         total_items = cursor.fetchone()['count']
         offset = (page - 1) * limit
         
-        # [BỌC THÉP DATETIME & ÉP KIỂU]: Ép sang chuỗi để tránh lỗi 500 JSON
+        # ⚡️ [BỌC THÉP SQL]: JOIN thêm Shops và ProductReviews để lấy Tên Shop và Điểm Đánh Giá
         sql_query = f"""
             SELECT 
                 p.ProductID::text AS "ProductID", p.ProductName AS "ProductName", 
                 p.Price AS "Price", p.StockQuantity AS "StockQuantity", 
                 p.SoldQuantity AS "SoldQuantity",
                 p.CategoryID::text AS "CategoryID", p.ShopID::text AS "ShopID", 
+                s.ShopName AS "ShopName",
                 p.IsActive AS "IsActive", TO_CHAR(p.CreatedAt, 'YYYY-MM-DD HH24:MI:SS') AS "CreatedAt",
-                COALESCE(img.ImageURL, '') AS "PrimaryImage"
+                COALESCE(img.ImageURL, '') AS "PrimaryImage",
+                COALESCE(ROUND(AVG(r.Rating), 1), 0) AS "AverageRating",
+                COUNT(r.ReviewID) AS "TotalReviews"
             FROM Products p
             LEFT JOIN ProductImages img ON p.ProductID = img.ProductID AND img.IsPrimary = TRUE
+            LEFT JOIN Shops s ON p.ShopID = s.ShopID
+            LEFT JOIN ProductReviews r ON p.ProductID = r.ProductID
             {where_clause}
+            GROUP BY p.ProductID, img.ImageURL, s.ShopName
             ORDER BY p.CreatedAt DESC, p.ProductID ASC
             LIMIT %s OFFSET %s;
         """
@@ -63,10 +67,11 @@ def get_all_products(page=1, limit=10, role_name=None, shop_id=None, user_id=Non
         cursor.execute(sql_query, tuple(query_params))
         products = cursor.fetchall()
         
-        # Ép kiểu float cho giá tiền
+        # Ép kiểu an toàn cho JSON
         for prod in products:
-            if prod.get('Price') is not None:
-                prod['Price'] = float(prod['Price'])
+            if prod.get('Price') is not None: prod['Price'] = float(prod['Price'])
+            if prod.get('AverageRating') is not None: prod['AverageRating'] = float(prod['AverageRating'])
+            if prod.get('TotalReviews') is not None: prod['TotalReviews'] = int(prod['TotalReviews'])
         
         total_pages = math.ceil(total_items / limit) if total_items > 0 else 1
         pagination_result = {
@@ -84,20 +89,28 @@ def get_all_products(page=1, limit=10, role_name=None, shop_id=None, user_id=Non
         if conn: conn.close()
 
 
-# ================= 2. CHI TIẾT SẢN PHẨM =================
+# ================= 2. CHI TIẾT SẢN PHẨM (NÂNG CẤP KÈM SHOP & RATING) =================
 def get_product_details(product_id, role_name=None):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Cơ sở dữ liệu", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        active_filter = "" if role_name == 'Admin' else "AND IsActive = TRUE"
+        active_filter = "" if role_name == 'Admin' else "AND p.IsActive = TRUE"
 
+        # ⚡️ [BỌC THÉP SQL]: Gom hết ShopName, TotalReviews, AverageRating vào 1 query
         sql_product = f"""
-            SELECT ProductID::text AS "ProductID", ProductName AS "ProductName", Price AS "Price", 
-                   StockQuantity AS "StockQuantity", SoldQuantity AS "SoldQuantity", 
-                   Description AS "Description", CategoryID::text AS "CategoryID", ShopID::text AS "ShopID", 
-                   IsActive AS "IsActive", TO_CHAR(CreatedAt, 'YYYY-MM-DD HH24:MI:SS') AS "CreatedAt"
-            FROM Products WHERE ProductID = %s {active_filter};
+            SELECT p.ProductID::text AS "ProductID", p.ProductName AS "ProductName", p.Price AS "Price", 
+                   p.StockQuantity AS "StockQuantity", p.SoldQuantity AS "SoldQuantity", 
+                   p.Description AS "Description", p.CategoryID::text AS "CategoryID", p.ShopID::text AS "ShopID", 
+                   s.ShopName AS "ShopName",
+                   p.IsActive AS "IsActive", TO_CHAR(p.CreatedAt, 'YYYY-MM-DD HH24:MI:SS') AS "CreatedAt",
+                   COALESCE(ROUND(AVG(r.Rating), 1), 0) AS "AverageRating",
+                   COUNT(r.ReviewID) AS "TotalReviews"
+            FROM Products p
+            LEFT JOIN Shops s ON p.ShopID = s.ShopID
+            LEFT JOIN ProductReviews r ON p.ProductID = r.ProductID
+            WHERE p.ProductID = %s {active_filter}
+            GROUP BY p.ProductID, s.ShopName;
         """
         cursor.execute(sql_product, (product_id,))
         product = cursor.fetchone()
@@ -105,12 +118,16 @@ def get_product_details(product_id, role_name=None):
         if not product:
             return False, "Sản phẩm không tồn tại hoặc đã ngừng kinh doanh", None
             
-        if product.get('Price') is not None:
-            product['Price'] = float(product['Price'])
+        # Ép kiểu an toàn
+        if product.get('Price') is not None: product['Price'] = float(product['Price'])
+        if product.get('AverageRating') is not None: product['AverageRating'] = float(product['AverageRating'])
+        if product.get('TotalReviews') is not None: product['TotalReviews'] = int(product['TotalReviews'])
             
+        # Bốc mảng Hình ảnh
         cursor.execute('SELECT ImageID::text AS "ImageID", ImageURL AS "ImageURL", IsPrimary AS "IsPrimary" FROM ProductImages WHERE ProductID = %s ORDER BY IsPrimary DESC, ImageID ASC;', (product_id,))
         product["Images"] = cursor.fetchall()
 
+        # Bốc mảng Thông số kỹ thuật
         cursor.execute('SELECT SpecKey AS "Key", SpecValue AS "Value" FROM ProductSpecifications WHERE ProductID = %s;', (product_id,))
         product["Specifications"] = cursor.fetchall()
         
@@ -139,7 +156,7 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
             if str(shop['managerid']) != str(user_id):
                 return False, "Bạn không có quyền thêm sản phẩm vào cửa hàng này", None
 
-        # 1. Ghi thông tin cơ bản
+        # Ghi thông tin cơ bản
         sql_insert_product = """
             INSERT INTO Products (ProductName, Price, StockQuantity, CategoryID, ShopID) 
             VALUES (%s, %s, %s, %s, %s) 
@@ -149,10 +166,9 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
         new_product = cursor.fetchone()
         product_id_str = new_product['productid']
         
-        if new_product.get('price') is not None:
-            new_product['price'] = float(new_product['price'])
+        if new_product.get('price') is not None: new_product['price'] = float(new_product['price'])
             
-        # 2. Ghi Hình ảnh
+        # Ghi Hình ảnh
         new_product['Images'] = [] 
         new_product['PrimaryImage'] = None 
         if image_urls and len(image_urls) > 0:
@@ -163,7 +179,7 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
                 new_product['Images'].append(url)
                 if is_primary: new_product['PrimaryImage'] = url
         
-        # 3. Ghi Thông số Kỹ thuật & Phân loại (VÁ LỖ HỔNG FE)
+        # Ghi Thông số Kỹ thuật & Phân loại
         new_product['Specifications'] = {}
         if specifications and isinstance(specifications, dict):
             sql_insert_spec = "INSERT INTO ProductSpecifications (ProductID, SpecKey, SpecValue) VALUES (%s, %s, %s);"
@@ -174,12 +190,18 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
 
         conn.commit()
         return True, "Tạo sản phẩm mới thành công", dict(new_product)
+    except errors.ForeignKeyViolation:
+        if conn: conn.rollback()
+        return False, "Mã Danh mục hoặc Cửa hàng không tồn tại trong hệ thống", None
+    except InvalidTextRepresentation:
+        if conn: conn.rollback()
+        return False, "Mã định danh Cửa hàng hoặc Danh mục không hợp lệ", None
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi cơ sở dữ liệu: {str(e)}", None
     finally:
         if conn: conn.close()
-    
+
 
 # ================= 4. CẬP NHẬT SẢN PHẨM =================
 def update_product(product_id, user_id, role_name, product_name=None, price=None, stock_quantity=None, category_id=None, image_urls=None, specifications=None):
@@ -194,7 +216,7 @@ def update_product(product_id, user_id, role_name, product_name=None, price=None
             if not shop: return False, "Sản phẩm không tồn tại", None
             if str(shop['managerid']) != str(user_id): return False, "Bạn không có quyền chỉnh sửa", None
 
-        # 1. Cập nhật thông tin cơ bản
+        # Cập nhật thông tin cơ bản
         sql_update_info = """
             UPDATE Products 
             SET ProductName = COALESCE(%s, ProductName), Price = COALESCE(%s, Price),
@@ -212,7 +234,7 @@ def update_product(product_id, user_id, role_name, product_name=None, price=None
         result_dict = dict(updated_product)
         if result_dict.get('Price') is not None: result_dict['Price'] = float(result_dict['Price'])
 
-        # 2. Xử lý Ảnh
+        # Xử lý Ảnh
         result_dict['Images'] = []
         if image_urls and len(image_urls) > 0:
             cursor.execute("DELETE FROM ProductImages WHERE ProductID = %s", (product_id,))
@@ -227,7 +249,7 @@ def update_product(product_id, user_id, role_name, product_name=None, price=None
             for img in old_images: result_dict['Images'].append(img['imageurl'])
             result_dict['PrimaryImage'] = old_images[0]['imageurl'] if old_images else None
 
-        # 3. Xử lý Specs (Xóa cũ nạp mới nếu có gửi lên)
+        # Xử lý Specs (Xóa cũ nạp mới)
         result_dict['Specifications'] = {}
         if specifications is not None and isinstance(specifications, dict):
             cursor.execute("DELETE FROM ProductSpecifications WHERE ProductID = %s", (product_id,))
@@ -239,6 +261,12 @@ def update_product(product_id, user_id, role_name, product_name=None, price=None
 
         conn.commit()
         return True, "Cập nhật sản phẩm thành công", result_dict
+    except errors.ForeignKeyViolation:
+        if conn: conn.rollback()
+        return False, "Mã Danh mục cập nhật không tồn tại", None
+    except InvalidTextRepresentation:
+        if conn: conn.rollback()
+        return False, "Mã sản phẩm hoặc danh mục không đúng định dạng", None
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi cơ sở dữ liệu: {str(e)}", None
@@ -254,15 +282,10 @@ def toggle_product_status(product_id, user_id, role_name):
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         if role_name != 'Admin':
-            cursor.execute("""
-                SELECT s.ManagerID::text FROM Products p
-                JOIN Shops s ON p.ShopID = s.ShopID
-                WHERE p.ProductID = %s
-            """, (product_id,))
+            cursor.execute("SELECT s.ManagerID::text FROM Products p JOIN Shops s ON p.ShopID = s.ShopID WHERE p.ProductID = %s", (product_id,))
             shop = cursor.fetchone()
             if not shop: return False, "Sản phẩm không tồn tại", None
-            if str(shop['managerid']) != str(user_id):
-                return False, "Bạn không có quyền ẩn/mở bán sản phẩm này", None
+            if str(shop['managerid']) != str(user_id): return False, "Bạn không có quyền thao tác", None
 
         sql_query = """
             UPDATE Products SET IsActive = NOT IsActive, UpdatedAt = CURRENT_TIMESTAMP
