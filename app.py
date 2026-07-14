@@ -4,6 +4,8 @@
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
+import json
+
 # Thêm import thư viện JWT
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, get_jwt, decode_token
 
@@ -458,8 +460,14 @@ def api_create_product():
         category_id = form_data.get('categoryid')
         shop_id = form_data.get('shopid')
 
+        # Hứng Specifications (Dạng chuỗi JSON do FE gửi qua FormData)
+        spec_raw = form_data.get('specifications')
+        specifications = {}
+        if spec_raw:
+            try: specifications = json.loads(spec_raw)
+            except Exception: return error_response("Định dạng specifications phải là chuỗi JSON", 400)
+
         user_id = get_jwt_identity()
-        # [SO QUYỀN ĐỘNG]: Bốc RoleName ra dùng, dẹp bỏ việc soi roleid!
         role_name = get_jwt().get('rolename')
 
         if not product_name or not price_raw or not category_id or not shop_id:
@@ -468,10 +476,9 @@ def api_create_product():
         try:
             price = float(price_raw)
             stock_quantity = int(stock_raw)
-            if price <= 0 or stock_quantity < 0:
-                return error_response("Giá và Số lượng tồn kho không hợp lệ", 400)
+            if price <= 0 or stock_quantity < 0: return error_response("Giá và Kho không hợp lệ", 400)
         except ValueError:
-            return error_response("Giá và Số lượng phải là định dạng số", 400)
+            return error_response("Giá và Số lượng phải là số", 400)
 
         danh_sach_files = request.files.getlist('images')
         image_urls = []
@@ -480,9 +487,8 @@ def api_create_product():
                 url = upload_image(file)
                 if url: image_urls.append(url)
 
-        # Truyền role_name xuống Service
         is_success, message, result_data = create_product(
-            product_name, price, stock_quantity, category_id, shop_id, user_id, role_name, image_urls
+            product_name, price, stock_quantity, category_id, shop_id, user_id, role_name, image_urls, specifications
         )
         
         if is_success: return jsonify(success_response(message, result_data)), 201
@@ -494,12 +500,21 @@ def api_create_product():
 def api_update_product(product_id):
     try:
         json_data = request.get_json() if request.is_json else None
+        specifications = None
+
         if json_data:
             form_data = {k.lower(): str(v).strip() for k, v in json_data.items() if v is not None}
             danh_sach_files = [] 
+            # Bắt luôn JSON trực tiếp
+            specifications = json_data.get('specifications')
         else:
             form_data = {k.lower(): v.strip() for k, v in request.form.items()}
             danh_sach_files = request.files.getlist('images')
+            # Bắt chuỗi JSON từ FormData
+            spec_raw = form_data.get('specifications')
+            if spec_raw:
+                try: specifications = json.loads(spec_raw)
+                except: return error_response("specifications sai định dạng JSON", 400)
 
         user_id = get_jwt_identity()
         role_name = get_jwt().get('rolename')
@@ -507,7 +522,6 @@ def api_update_product(product_id):
         product_name = form_data.get('productname')
         if product_name == "": product_name = None
         
-        # [VÁ TỰ SÁT ÉP KIỂU]: Tuyệt đối cấm bọc int() cho chuỗi UUID
         category_id_raw = form_data.get('categoryid')
         category_id = category_id_raw.strip() if category_id_raw and category_id_raw != "" else None
         
@@ -523,7 +537,7 @@ def api_update_product(product_id):
                 if url: image_urls.append(url)
 
         is_success, message, result_data = update_product(
-            str(product_id).strip(), user_id, role_name, product_name, price, stock_quantity, category_id, image_urls
+            str(product_id).strip(), user_id, role_name, product_name, price, stock_quantity, category_id, image_urls, specifications
         )
         
         if is_success: return jsonify(success_response(message, result_data)), 200

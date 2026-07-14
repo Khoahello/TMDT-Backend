@@ -126,7 +126,7 @@ def get_product_details(product_id, role_name=None):
     
 
 # ================= 3. TẠO SẢN PHẨM MỚI =================
-def create_product(product_name, price, stock_quantity, category_id, shop_id, user_id, role_name, image_urls=None):
+def create_product(product_name, price, stock_quantity, category_id, shop_id, user_id, role_name, image_urls=None, specifications=None):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối Cơ sở dữ liệu", None
     try:
@@ -135,11 +135,11 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
         if role_name != 'Admin': 
             cursor.execute("SELECT ManagerID::text FROM Shops WHERE ShopID = %s", (shop_id,))
             shop = cursor.fetchone()
-            if not shop:
-                return False, "Cửa hàng không tồn tại", None
+            if not shop: return False, "Cửa hàng không tồn tại", None
             if str(shop['managerid']) != str(user_id):
                 return False, "Bạn không có quyền thêm sản phẩm vào cửa hàng này", None
 
+        # 1. Ghi thông tin cơ bản
         sql_insert_product = """
             INSERT INTO Products (ProductName, Price, StockQuantity, CategoryID, ShopID) 
             VALUES (%s, %s, %s, %s, %s) 
@@ -152,28 +152,28 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
         if new_product.get('price') is not None:
             new_product['price'] = float(new_product['price'])
             
+        # 2. Ghi Hình ảnh
         new_product['Images'] = [] 
         new_product['PrimaryImage'] = None 
-        
         if image_urls and len(image_urls) > 0:
             for index, url in enumerate(image_urls):
                 is_primary = (index == 0) 
-                sql_insert_image = """
-                    INSERT INTO ProductImages (ProductID, ImageURL, IsPrimary)
-                    VALUES (%s, %s, %s) RETURNING ImageURL;
-                """
+                sql_insert_image = "INSERT INTO ProductImages (ProductID, ImageURL, IsPrimary) VALUES (%s, %s, %s) RETURNING ImageURL;"
                 cursor.execute(sql_insert_image, (product_id_str, url, is_primary))
                 new_product['Images'].append(url)
                 if is_primary: new_product['PrimaryImage'] = url
-                    
+        
+        # 3. Ghi Thông số Kỹ thuật & Phân loại (VÁ LỖ HỔNG FE)
+        new_product['Specifications'] = {}
+        if specifications and isinstance(specifications, dict):
+            sql_insert_spec = "INSERT INTO ProductSpecifications (ProductID, SpecKey, SpecValue) VALUES (%s, %s, %s);"
+            for key, val in specifications.items():
+                if key and val:
+                    cursor.execute(sql_insert_spec, (product_id_str, str(key).strip(), str(val).strip()))
+                    new_product['Specifications'][str(key).strip()] = str(val).strip()
+
         conn.commit()
         return True, "Tạo sản phẩm mới thành công", dict(new_product)
-    except errors.ForeignKeyViolation:
-        if conn: conn.rollback()
-        return False, "Mã Danh mục hoặc Cửa hàng không tồn tại trong hệ thống", None
-    except InvalidTextRepresentation:
-        if conn: conn.rollback()
-        return False, "Mã định danh Cửa hàng hoặc Danh mục không hợp lệ", None
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi cơ sở dữ liệu: {str(e)}", None
@@ -182,23 +182,19 @@ def create_product(product_name, price, stock_quantity, category_id, shop_id, us
     
 
 # ================= 4. CẬP NHẬT SẢN PHẨM =================
-def update_product(product_id, user_id, role_name, product_name=None, price=None, stock_quantity=None, category_id=None, image_urls=None):
+def update_product(product_id, user_id, role_name, product_name=None, price=None, stock_quantity=None, category_id=None, image_urls=None, specifications=None):
     conn = get_db_connection()
     if not conn: return False, "Lỗi kết nối", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
         if role_name != 'Admin':
-            cursor.execute("""
-                SELECT s.ManagerID::text FROM Products p
-                JOIN Shops s ON p.ShopID = s.ShopID
-                WHERE p.ProductID = %s
-            """, (product_id,))
+            cursor.execute("SELECT s.ManagerID::text FROM Products p JOIN Shops s ON p.ShopID = s.ShopID WHERE p.ProductID = %s", (product_id,))
             shop = cursor.fetchone()
             if not shop: return False, "Sản phẩm không tồn tại", None
-            if str(shop['managerid']) != str(user_id):
-                return False, "Bạn không có quyền chỉnh sửa sản phẩm này", None
+            if str(shop['managerid']) != str(user_id): return False, "Bạn không có quyền chỉnh sửa", None
 
+        # 1. Cập nhật thông tin cơ bản
         sql_update_info = """
             UPDATE Products 
             SET ProductName = COALESCE(%s, ProductName), Price = COALESCE(%s, Price),
@@ -211,42 +207,38 @@ def update_product(product_id, user_id, role_name, product_name=None, price=None
         """
         cursor.execute(sql_update_info, (product_name, price, stock_quantity, category_id, product_id))
         updated_product = cursor.fetchone()
-        
-        if not updated_product:
-            return False, "Không tìm thấy sản phẩm hoặc sản phẩm đang bị khóa", None
+        if not updated_product: return False, "Không tìm thấy sản phẩm hoặc đang bị khóa", None
 
         result_dict = dict(updated_product)
-        if result_dict.get('Price') is not None:
-            result_dict['Price'] = float(result_dict['Price'])
+        if result_dict.get('Price') is not None: result_dict['Price'] = float(result_dict['Price'])
 
+        # 2. Xử lý Ảnh
         result_dict['Images'] = []
         if image_urls and len(image_urls) > 0:
             cursor.execute("DELETE FROM ProductImages WHERE ProductID = %s", (product_id,))
             for index, url in enumerate(image_urls):
                 is_primary = (index == 0)
-                cursor.execute("""
-                    INSERT INTO ProductImages (ProductID, ImageURL, IsPrimary)
-                    VALUES (%s, %s, %s)
-                """, (product_id, url, is_primary))
+                cursor.execute("INSERT INTO ProductImages (ProductID, ImageURL, IsPrimary) VALUES (%s, %s, %s)", (product_id, url, is_primary))
                 result_dict['Images'].append(url)
                 if is_primary: result_dict['PrimaryImage'] = url
         else:
-            cursor.execute("""
-                SELECT ImageURL, IsPrimary FROM ProductImages 
-                WHERE ProductID = %s ORDER BY IsPrimary DESC, ImageID ASC
-            """, (product_id,))
+            cursor.execute("SELECT ImageURL, IsPrimary FROM ProductImages WHERE ProductID = %s ORDER BY IsPrimary DESC, ImageID ASC", (product_id,))
             old_images = cursor.fetchall()
             for img in old_images: result_dict['Images'].append(img['imageurl'])
             result_dict['PrimaryImage'] = old_images[0]['imageurl'] if old_images else None
 
+        # 3. Xử lý Specs (Xóa cũ nạp mới nếu có gửi lên)
+        result_dict['Specifications'] = {}
+        if specifications is not None and isinstance(specifications, dict):
+            cursor.execute("DELETE FROM ProductSpecifications WHERE ProductID = %s", (product_id,))
+            sql_insert_spec = "INSERT INTO ProductSpecifications (ProductID, SpecKey, SpecValue) VALUES (%s, %s, %s);"
+            for key, val in specifications.items():
+                if key and val:
+                    cursor.execute(sql_insert_spec, (product_id, str(key).strip(), str(val).strip()))
+                    result_dict['Specifications'][str(key).strip()] = str(val).strip()
+
         conn.commit()
         return True, "Cập nhật sản phẩm thành công", result_dict
-    except errors.ForeignKeyViolation:
-        if conn: conn.rollback()
-        return False, "Mã Danh mục cập nhật không tồn tại", None
-    except InvalidTextRepresentation:
-        if conn: conn.rollback()
-        return False, "Mã sản phẩm hoặc danh mục không đúng định dạng", None
     except Exception as e:
         if conn: conn.rollback()
         return False, f"Lỗi cơ sở dữ liệu: {str(e)}", None
