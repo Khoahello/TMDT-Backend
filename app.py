@@ -476,13 +476,14 @@ def api_create_product():
     try:
         form_data = {k.lower(): v.strip() for k, v in request.form.items()}
         
-        product_name = form_data.get('productname')
+        # ⚡️ BỌC THÉP: Hứng đa dạng key từ FE (có gạch dưới hoặc không)
+        product_name = form_data.get('productname') or form_data.get('product_name')
+        description = form_data.get('description')
         price_raw = form_data.get('price')
-        stock_raw = form_data.get('stockquantity', '0')
-        category_id = form_data.get('categoryid')
-        shop_id = form_data.get('shopid')
+        stock_raw = form_data.get('stockquantity') or form_data.get('stock_quantity') or '0'
+        category_id = form_data.get('categoryid') or form_data.get('category_id')
+        shop_id = form_data.get('shopid') or form_data.get('shop_id')
 
-        # Hứng Specifications (Dạng chuỗi JSON do FE gửi qua FormData)
         spec_raw = form_data.get('specifications')
         specifications = {}
         if spec_raw:
@@ -500,7 +501,7 @@ def api_create_product():
             stock_quantity = int(stock_raw)
             if price <= 0 or stock_quantity < 0: return error_response("Giá và Kho không hợp lệ", 400)
         except ValueError:
-            return error_response("Giá và Số lượng phải là số", 400)
+            return error_response("Giá và Số lượng phải là định dạng số", 400)
 
         danh_sach_files = request.files.getlist('images')
         image_urls = []
@@ -510,13 +511,14 @@ def api_create_product():
                 if url: image_urls.append(url)
 
         is_success, message, result_data = create_product(
-            product_name, price, stock_quantity, category_id, shop_id, user_id, role_name, image_urls, specifications
+            product_name, description, price, stock_quantity, category_id, shop_id, user_id, role_name, image_urls, specifications
         )
         
         if is_success: return jsonify(success_response(message, result_data)), 201
         return error_response(message, 403 if "quyền" in message else 400)
     except Exception as e: return server_error_response(e)
     
+
 @app.route('/api/products/<string:product_id>', methods=['PATCH', 'PUT'])
 @jwt_required()
 def api_update_product(product_id):
@@ -527,12 +529,10 @@ def api_update_product(product_id):
         if json_data:
             form_data = {k.lower(): str(v).strip() for k, v in json_data.items() if v is not None}
             danh_sach_files = [] 
-            # Bắt luôn JSON trực tiếp
             specifications = json_data.get('specifications')
         else:
             form_data = {k.lower(): v.strip() for k, v in request.form.items()}
             danh_sach_files = request.files.getlist('images')
-            # Bắt chuỗi JSON từ FormData
             spec_raw = form_data.get('specifications')
             if spec_raw:
                 try: specifications = json.loads(spec_raw)
@@ -541,15 +541,20 @@ def api_update_product(product_id):
         user_id = get_jwt_identity()
         role_name = get_jwt().get('rolename')
 
-        product_name = form_data.get('productname')
+        # ⚡️ BỌC THÉP KEY
+        product_name = form_data.get('productname') or form_data.get('product_name')
         if product_name == "": product_name = None
         
-        category_id_raw = form_data.get('categoryid')
+        description = form_data.get('description')
+        if description == "": description = None
+        
+        category_id_raw = form_data.get('categoryid') or form_data.get('category_id')
         category_id = category_id_raw.strip() if category_id_raw and category_id_raw != "" else None
         
         price_raw = form_data.get('price')
         price = float(price_raw) if price_raw and price_raw != "" else None
-        stock_raw = form_data.get('stockquantity')
+        
+        stock_raw = form_data.get('stockquantity') or form_data.get('stock_quantity')
         stock_quantity = int(stock_raw) if stock_raw and stock_raw != "" else None
 
         image_urls = []
@@ -559,7 +564,7 @@ def api_update_product(product_id):
                 if url: image_urls.append(url)
 
         is_success, message, result_data = update_product(
-            str(product_id).strip(), user_id, role_name, product_name, price, stock_quantity, category_id, image_urls, specifications
+            str(product_id).strip(), user_id, role_name, product_name, description, price, stock_quantity, category_id, image_urls, specifications
         )
         
         if is_success: return jsonify(success_response(message, result_data)), 200
