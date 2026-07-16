@@ -1,10 +1,10 @@
 import os
 import cloudinary
 import cloudinary.uploader
+import base64
 from werkzeug.utils import secure_filename
 
 # ================= CẤU HÌNH CLOUDINARY =================
-# Tự động nhặt chìa khóa từ Render Environment
 cloudinary.config(
     cloud_name=os.getenv('CLOUDINARY_CLOUD_NAME'),
     api_key=os.getenv('CLOUDINARY_API_KEY'),
@@ -19,7 +19,8 @@ def allowed_file(filename):
 
 def upload_image(file_object):
     """
-    Nhận file từ Request, kiểm tra an ninh và đẩy thẳng lên Cloudinary.
+    Nhận file từ Request, chuyển sang chuỗi Base64 để tránh lỗi đệ quy,
+    sau đó đẩy thẳng lên mây Cloudinary.
     """
     if not file_object or file_object.filename == '':
         return None
@@ -29,31 +30,43 @@ def upload_image(file_object):
         return None
         
     try:
-        # 1. KIỂM TRA DUNG LƯỢNG (Giữ nguyên chốt chặn 5MB cực xịn của ông)
+        # 1. KIỂM TRA DUNG LƯỢNG (Chốt chặn 5MB)
         file_object.seek(0, os.SEEK_END)
         if file_object.tell() > 5 * 1024 * 1024:
             print("⚠️ [SECURITY REJECTED]: Kích thước ảnh vượt quá 5MB!")
             return None
-        file_object.seek(0, 0) # Trả con trỏ về đầu để chuẩn bị gửi đi
+        file_object.seek(0, 0) # Trả con trỏ về đầu
 
-        # Lọc tên file an toàn trước khi đẩy lên mây
-        safe_filename = secure_filename(file_object.filename).rsplit('.', 1)[0]
+        # 2. XỬ LÝ TÊN FILE AN TOÀN
+        safe_filename = secure_filename(file_object.filename)
+        if '.' in safe_filename:
+            safe_filename = safe_filename.rsplit('.', 1)[0]
+        # Xử lý trường hợp file tên tiếng việt bị secure_filename xóa trắng
+        if not safe_filename:
+            safe_filename = "tmdt_image"
 
-        # 2. BẮN HỎA TIỄN LÊN CLOUDINARY
+        # 3. ⚡️ TUYỆT KỸ TRÁNH LỖI ĐỆ QUY (RECURSION ERROR) ⚡️
+        # Chuyển đổi dữ liệu file thô thành chuỗi Base64 Data URI
+        file_bytes = file_object.read()
+        encoded_string = base64.b64encode(file_bytes).decode('utf-8')
+        mime_type = file_object.mimetype or 'image/jpeg'
+        
+        data_uri = f"data:{mime_type};base64,{encoded_string}"
+
+        # 4. BẮN HỎA TIỄN LÊN CLOUDINARY
         upload_result = cloudinary.uploader.upload(
-            file_object,
-            folder="tmdt_due_uploads", # Gom hết vào thư mục này trên Cloudinary cho gọn gàng
-            public_id=safe_filename,   # Đặt tên file trên Cloud
-            resource_type="image"
+            data_uri,                  # Gửi chuỗi string thay vì object file
+            folder="tmdt_due_uploads", 
+            public_id=safe_filename,   
+            resource_type="auto"       # Tự động nhận diện ảnh
         )
         
-        # 3. NHẬN KẾT QUẢ VỀ
-        # Lấy link HTTPS bảo mật tuyệt đối
+        # 5. Lấy link trả về
         file_url = upload_result.get('secure_url')
         print(f"✅ [UPLOAD SUCCESS]: {file_url}")
         
         return file_url
         
     except Exception as e:
-        print(f"❌ [CLOUDINARY FAILED]: Lỗi tải ảnh lên Cloud - {str(e)}")
+        print(f"❌ [CLOUDINARY FAILED]: {str(e)}")
         return None
