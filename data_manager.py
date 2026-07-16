@@ -4,7 +4,7 @@ from psycopg2 import pool
 import psycopg2.extras
 
 # Khởi tạo Hồ chứa kết nối (Connection Pool) dùng chung cho toàn hệ thống
-# Min = 1, Max = 20 kết nối đồng thời. Tùy chỉnh theo gói RAM của Render.
+# Min = 1, Max = 20 kết nối đồng thời.
 try:
     db_pool = psycopg2.pool.ThreadedConnectionPool(
         1, 20,
@@ -20,38 +20,46 @@ except Exception as e:
     db_pool = None
 
 
+class PooledConnectionWrapper:
+    """
+    Lớp bọc (Wrapper) an toàn cho Connection C-Extension.
+    Nhiệm vụ: Canh gác lệnh close() để trả về hồ chứa thay vì đóng hẳn.
+    """
+    def __init__(self, pool, conn):
+        self._pool = pool
+        self._conn = conn
+
+    def close(self):
+        """Đánh chặn lệnh close() từ tầng Service để trả về Pool"""
+        if self._conn:
+            try:
+                self._pool.putconn(self._conn)
+            except Exception as e:
+                print(f"⚠️ [POOL WARNING]: Không thể trả kết nối về hồ - {e}")
+            finally:
+                self._conn = None
+
+    def __getattr__(self, name):
+        """
+        Ủy quyền (Delegate) tự động.
+        Bất kỳ lệnh nào khác (cursor, commit, rollback...) đều được chuyển thẳng cho conn gốc.
+        """
+        return getattr(self._conn, name)
+
+
 def get_db_connection():
-    """
-    Nhà máy cấp phát kết nối siêu tốc từ Pool.
-    Tự động ghi đè hàm close() để tương thích 100% với code cũ của toàn bộ hệ thống.
-    """
+    """Nhà máy cấp phát kết nối siêu tốc lấy từ Pool."""
     if not db_pool:
         print("❌ [DB_ERROR]: Hồ chứa kết nối chưa sẵn sàng!")
         return None
 
     try:
-        # Rút 1 kết nối có sẵn từ trong Hồ ra dùng (Mất 0.001 giây thay vì 0.2 giây)
-        conn = db_pool.getconn()
-
-        if conn:
-            # ⚡️ TUYỆT KỸ MONKEY-PATCHING:
-            # Ghi đè phương thức .close() mặc định của connection này.
-            # Khi file Service gọi conn.close(), nó sẽ thực thi lệnh db_pool.putconn(conn)
-            # Giúp ông KHÔNG PHẢI SỬA bất kỳ file Service nào mà hệ thống vẫn chạy chuẩn!
-            
-            # Lưu lại hàm close gốc (đề phòng cần dùng)
-            conn._original_close = conn.close 
-            
-            # Tráo đổi hàm close
-            def pooled_close():
-                try:
-                    db_pool.putconn(conn)
-                except Exception as put_err:
-                    print(f"⚠️ [POOL WARNING]: Lỗi khi trả connection về pool - {put_err}")
-            
-            conn.close = pooled_close
-            
-            return conn
+        # Rút 1 kết nối gốc từ trong Hồ ra
+        raw_conn = db_pool.getconn()
+        
+        if raw_conn:
+            # Bọc nó vào áo khoác Python rồi mới ném lên cho tầng Service sử dụng
+            return PooledConnectionWrapper(db_pool, raw_conn)
             
     except Exception as e:
         print(f"❌ [DB_CONNECTION_FAILED]: Cạn kiệt kết nối hoặc lỗi mạng - {e}")
