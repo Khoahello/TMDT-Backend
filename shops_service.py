@@ -13,7 +13,6 @@ def _get_role_uuid(conn, role_name):
         raise ValueError(f"CRITICAL ERROR: Không tìm thấy Role '{role_name}' trong CSDL!")
     return str(res[0])
 
-# Trong file shops_service.py, sửa đè 2 hàm GET này:
 
 def get_all_shops(page=1, limit=10, role_name=None):
     """Admin soi Full danh sách, Khách soi chỉ thấy Shop IsActive=True"""
@@ -21,7 +20,6 @@ def get_all_shops(page=1, limit=10, role_name=None):
     if not conn: return False, "Lỗi kết nối Cơ sở dữ liệu", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
         where_clause = "" if role_name == 'Admin' else "WHERE IsActive = TRUE"
 
         cursor.execute(f"SELECT COUNT(*) FROM Shops {where_clause};")
@@ -63,7 +61,6 @@ def get_shop_details(shop_id, role_name=None):
     if not conn: return False, "Lỗi kết nối CSDL", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
         active_filter = "" if role_name == 'Admin' else "AND IsActive = TRUE"
 
         sql_query = f"""
@@ -72,7 +69,7 @@ def get_shop_details(shop_id, role_name=None):
                 Hotline AS "Hotline", Description AS "Description", Rating AS "Rating",
                 ShopImageURL AS "ShopImageURL", ManagerID::text AS "ManagerID", 
                 IsActive AS "IsActive", CreatedAt AS "CreatedAt", UpdatedAt AS "UpdatedAt"
-            FROM Shops WHERE ShopID = %s {active_filter};
+            FROM Shops WHERE ShopID = %s::uuid {active_filter};
         """
         cursor.execute(sql_query, (shop_id,))
         shop = cursor.fetchone()
@@ -96,22 +93,18 @@ def create_shop(shop_name, address, hotline, manager_id, description=None):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # 1. TRUY VẤN ĐỘNG: Kiểm tra xem tài khoản này hiện tại đang giữ quyền gì trong DB
         cursor.execute("""
             SELECT u.RoleID::text AS roleid, r.RoleName AS rolename 
-            FROM Users u 
-            JOIN Roles r ON u.RoleID = r.RoleID 
-            WHERE u.UserID = %s;
+            FROM Users u JOIN Roles r ON u.RoleID = r.RoleID WHERE u.UserID = %s::uuid;
         """, (str(manager_id),))
         current_user_role = cursor.fetchone()
         
         if not current_user_role:
             return False, "Tài khoản người dùng thực hiện tạo cửa hàng không tồn tại", None
             
-        # 2. TIẾN HÀNH CHÈN SHOP MỚI
         sql_insert_shop = """
             INSERT INTO Shops (ShopName, Address, Hotline, ManagerID, Description) 
-            VALUES (%s, %s, %s, %s, %s) 
+            VALUES (%s, %s, %s, %s::uuid, %s) 
             RETURNING ShopID::text AS "ShopID", ShopName AS "ShopName", Description AS "Description", Rating AS "Rating";
         """
         cursor.execute(sql_insert_shop, (shop_name, address, hotline, str(manager_id), description))
@@ -120,26 +113,20 @@ def create_shop(shop_name, address, hotline, manager_id, description=None):
         if new_shop.get('Rating') is not None: 
             new_shop['Rating'] = float(new_shop['Rating'])
         
-        # 3. XỬ LÝ PHÂN QUYỀN ĐỘNG THEO NGỮ CẢNH:
         final_role_id = current_user_role['roleid']
         final_role_name = current_user_role['rolename']
         
-        # Chỉ đè lệnh UPDATE nâng cấp lên Manager nếu tài khoản này đang là Customer thuần túy
         if current_user_role['rolename'] == 'Customer':
             manager_role_uuid = _get_role_uuid(conn, 'Manager')
             
             cursor.execute("""
-                UPDATE Users 
-                SET RoleID = %s, UpdatedAt = CURRENT_TIMESTAMP 
-                WHERE UserID = %s;
+                UPDATE Users SET RoleID = %s::uuid, UpdatedAt = CURRENT_TIMESTAMP WHERE UserID = %s::uuid;
             """, (manager_role_uuid, str(manager_id)))
             
             final_role_id = manager_role_uuid
             final_role_name = 'Manager'
             
         conn.commit()
-        
-        # Trả về chính xác vai trò thực tế cuối cùng của User (Admin giữ Admin, Manager giữ Manager)
         return True, "Tạo cửa hàng và đồng bộ vai trò thành công", {
             "shop": new_shop,
             "final_role_uuid": final_role_id,
@@ -159,12 +146,11 @@ def update_shop(shop_id, user_id, role_name, shop_name=None, address=None, hotli
     if not conn: return False, "Lỗi kết nối", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cursor.execute("SELECT ManagerID::text FROM Shops WHERE ShopID = %s", (shop_id,))
+        cursor.execute("SELECT ManagerID::text FROM Shops WHERE ShopID = %s::uuid", (shop_id,))
         shop = cursor.fetchone()
         
         if not shop: return False, "Không tìm thấy cửa hàng", None
             
-        # SO QUYỀN BẰNG TÊN: role_name != 'Admin'
         if str(shop['managerid']) != str(user_id) and role_name != 'Admin':
             return False, "Bạn không có quyền cập nhật thông tin cửa hàng này", None
 
@@ -173,7 +159,7 @@ def update_shop(shop_id, user_id, role_name, shop_name=None, address=None, hotli
             SET ShopName = COALESCE(%s, ShopName), Address = COALESCE(%s, Address),
                 Hotline = COALESCE(%s, Hotline), Description = COALESCE(%s, Description),
                 UpdatedAt = CURRENT_TIMESTAMP
-            WHERE ShopID = %s AND IsActive = TRUE
+            WHERE ShopID = %s::uuid AND IsActive = TRUE
             RETURNING ShopID::text AS "ShopID", ShopName AS "ShopName", Address AS "Address", 
                       Hotline AS "Hotline", Description AS "Description", Rating AS "Rating", ManagerID::text AS "ManagerID";
         """
@@ -200,7 +186,7 @@ def toggle_shop_status(shop_id):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         sql_query = """
-            UPDATE Shops SET IsActive = NOT IsActive, UpdatedAt = CURRENT_TIMESTAMP WHERE ShopID = %s
+            UPDATE Shops SET IsActive = NOT IsActive, UpdatedAt = CURRENT_TIMESTAMP WHERE ShopID = %s::uuid
             RETURNING ShopID::text AS "ShopID", ShopName AS "ShopName", IsActive AS "IsActive";
         """
         cursor.execute(sql_query, (shop_id,))

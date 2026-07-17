@@ -8,8 +8,6 @@ def get_all_categories(role_name=None):
     if not conn: return False, "Lỗi kết nối Cơ sở dữ liệu", None
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
-        # BỌC THÉP NGỮ CẢNH: 
         where_clause = "" if role_name == 'Admin' else "WHERE IsActive = TRUE"
         
         sql_query = f"""
@@ -55,7 +53,7 @@ def update_category(category_id, category_name=None, description=None):
         sql_query = """
             UPDATE Categories 
             SET CategoryName = COALESCE(%s, CategoryName), Description = COALESCE(%s, Description)
-            WHERE CategoryID = %s
+            WHERE CategoryID = %s::uuid
             RETURNING CategoryID::text AS "CategoryID", CategoryName AS "CategoryName", Description AS "Description", IsActive AS "IsActive";
         """
         cursor.execute(sql_query, (category_name, description, category_id))
@@ -79,7 +77,7 @@ def toggle_category_status(category_id):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         sql_query = """
-            UPDATE Categories SET IsActive = NOT IsActive WHERE CategoryID = %s
+            UPDATE Categories SET IsActive = NOT IsActive WHERE CategoryID = %s::uuid
             RETURNING CategoryID::text AS "CategoryID", CategoryName AS "CategoryName", IsActive AS "IsActive";
         """
         cursor.execute(sql_query, (category_id,))
