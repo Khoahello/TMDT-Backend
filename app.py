@@ -1,5 +1,5 @@
 import eventlet
-eventlet.monkey_patch(socket=False) # Lệnh cấm: "Hãy bất đồng bộ mọi thứ, TRỪ CỔNG MẠNG RA để tao còn gửi Email!"
+eventlet.monkey_patch()
 
 from flask import Flask, jsonify, request
 from flask_cors import CORS
