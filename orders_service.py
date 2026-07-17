@@ -11,11 +11,12 @@ def get_all_orders(page=1, limit=10, user_id=None, role_name=None):
         where_clause = ""
         params = []
         
+        # ⚡️ BỌC THÉP: Ép kiểu ::uuid
         if role_name == 'Customer': 
-            where_clause = "WHERE o.UserID = %s"
+            where_clause = "WHERE o.UserID = %s::uuid"
             params.append(user_id)
         elif role_name == 'Manager': 
-            where_clause = "WHERE o.ShopID IN (SELECT ShopID FROM Shops WHERE ManagerID = %s)"
+            where_clause = "WHERE o.ShopID IN (SELECT ShopID FROM Shops WHERE ManagerID = %s::uuid)"
             params.append(user_id)
 
         cursor.execute(f"SELECT COUNT(*) FROM Orders o {where_clause};", tuple(params))
@@ -82,7 +83,6 @@ def get_order_details(order_id, user_id, role_name):
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # TỐI ƯU 1: Gộp check ManagerID vào luôn câu query đơn hàng
         sql_order = """
             SELECT o.OrderID::text AS "OrderID", o.UserID::text AS "UserID", o.ShopID::text AS "ShopID",
                    o.OrderDate AS "OrderDate", o.TotalAmount AS "TotalAmount", o.Status AS "Status",
@@ -90,7 +90,7 @@ def get_order_details(order_id, user_id, role_name):
                    s.ManagerID::text AS "ManagerID"
             FROM Orders o
             LEFT JOIN Shops s ON o.ShopID = s.ShopID
-            WHERE o.OrderID = %s;
+            WHERE o.OrderID = %s::uuid;
         """
         cursor.execute(sql_order, (order_id,))
         order_info = cursor.fetchone()
@@ -110,7 +110,7 @@ def get_order_details(order_id, user_id, role_name):
         sql_details = """
             SELECT od.OrderDetailID::text AS "OrderDetailID", od.ProductID::text AS "ProductID",
                    p.ProductName AS "ProductName", od.Quantity AS "Quantity", od.UnitPrice AS "UnitPrice"
-            FROM OrderDetails od JOIN Products p ON od.ProductID = p.ProductID WHERE od.OrderID = %s;
+            FROM OrderDetails od JOIN Products p ON od.ProductID = p.ProductID WHERE od.OrderID = %s::uuid;
         """
         cursor.execute(sql_details, (order_id,))
         order_dict['Items'] = []
@@ -134,12 +134,13 @@ def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_pho
     try:
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # TỐI ƯU 2: Nhặt toàn bộ sản phẩm bằng 1 truy vấn duy nhất (Trị bệnh N+1)
         product_ids = [str(item['ProductID']).strip() for item in items_list]
+        
+        # ⚡️ BỌC THÉP LỖI CỦA ÔNG: Ép kiểu mảng %s thành ::uuid[]
         cursor.execute("""
             SELECT ProductID::text AS productid, ProductName AS productname, Price AS price, 
                    StockQuantity AS stockquantity, ShopID::text AS shopid, IsActive AS isactive 
-            FROM Products WHERE ProductID = ANY(%s) FOR UPDATE;
+            FROM Products WHERE ProductID = ANY(%s::uuid[]) FOR UPDATE;
         """, (product_ids,))
         
         products_db = {p['productid']: p for p in cursor.fetchall()}
@@ -158,7 +159,7 @@ def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_pho
                 
             if int(product['stockquantity']) < buy_qty:
                 conn.rollback()
-                return False, f"Sản phẩm '{product['productname']}' không đủ hàng trong kho", None
+                return False, f"Sản phẩm '{product.get('productname', p_id)}' không đủ hàng trong kho", None
                 
             unit_price = float(product['price'])
             total_amount += unit_price * buy_qty
@@ -168,7 +169,7 @@ def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_pho
 
         sql_insert_order = """
             INSERT INTO Orders (UserID, ShopID, TotalAmount, ShippingAddress, ShippingName, ShippingPhone, Note, PaymentMethod, Status, PaymentStatus)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'Chờ xác nhận', %s)
+            VALUES (%s::uuid, %s::uuid, %s, %s, %s, %s, %s, %s, 'Chờ xác nhận', %s)
             RETURNING OrderID::text AS "OrderID", OrderDate AS "OrderDate", Status AS "Status", PaymentMethod AS "PaymentMethod", PaymentStatus AS "PaymentStatus";
         """
         cursor.execute(sql_insert_order, (
@@ -178,11 +179,11 @@ def create_order(user_id, shop_id, shipping_address, shipping_name, shipping_pho
         new_order = cursor.fetchone()
         order_id_created = new_order['OrderID']
         
-        # TỐI ƯU 3: Insert và Update hàng loạt (execute_batch)
-        insert_details_sql = "INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice) VALUES (%s, %s, %s, %s)"
+        # ⚡️ BỌC THÉP BATCH: Đảm bảo UUID không bị từ chối
+        insert_details_sql = "INSERT INTO OrderDetails (OrderID, ProductID, Quantity, UnitPrice) VALUES (%s::uuid, %s::uuid, %s, %s)"
         psycopg2.extras.execute_batch(cursor, insert_details_sql, [(order_id_created, v['ProductID'], v['Quantity'], v['UnitPrice']) for v in valid_items])
         
-        update_product_sql = "UPDATE Products SET StockQuantity = StockQuantity - %s, SoldQuantity = SoldQuantity + %s WHERE ProductID = %s"
+        update_product_sql = "UPDATE Products SET StockQuantity = StockQuantity - %s, SoldQuantity = SoldQuantity + %s WHERE ProductID = %s::uuid"
         psycopg2.extras.execute_batch(cursor, update_product_sql, [(v['Quantity'], v['Quantity'], v['ProductID']) for v in valid_items])
 
         conn.commit()
@@ -204,15 +205,14 @@ def update_order_status(order_id, new_status, user_id, role_name):
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         if role_name == 'Customer': return False, "Khách hàng không có quyền cập nhật", None
 
-        # Gộp query lấy ManagerID
-        cursor.execute("SELECT o.ShopID::text, s.ManagerID::text FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s", (order_id,))
+        cursor.execute("SELECT o.ShopID::text, s.ManagerID::text FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s::uuid", (order_id,))
         order = cursor.fetchone()
         if not order: return False, "Đơn hàng không tồn tại", None
         if role_name == 'Manager' and str(order['managerid']) != str(user_id):
             return False, "Bạn không có quyền cập nhật đơn hàng của tiệm khác", None
 
         cursor.execute("""
-            UPDATE Orders SET Status = %s WHERE OrderID = %s AND Status != 'Đã hủy'
+            UPDATE Orders SET Status = %s WHERE OrderID = %s::uuid AND Status != 'Đã hủy'
             RETURNING OrderID::text AS "OrderID", Status AS "Status", PaymentStatus AS "PaymentStatus";
         """, (new_status, order_id))
         updated_order = cursor.fetchone()
@@ -236,7 +236,7 @@ def cancel_order(order_id, user_id, role_name):
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
             SELECT o.UserID::text AS userid, o.Status AS status, o.PaymentStatus AS paymentstatus, s.ManagerID::text AS managerid 
-            FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s FOR UPDATE;
+            FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s::uuid FOR UPDATE;
         """, (order_id,))
         order = cursor.fetchone()
         
@@ -257,18 +257,17 @@ def cancel_order(order_id, user_id, role_name):
 
         new_payment_status = 'Đã hoàn tiền' if order['paymentstatus'] == 'Đã thanh toán' else order['paymentstatus']
         cursor.execute("""
-            UPDATE Orders SET Status = 'Đã hủy', PaymentStatus = %s WHERE OrderID = %s 
+            UPDATE Orders SET Status = 'Đã hủy', PaymentStatus = %s WHERE OrderID = %s::uuid 
             RETURNING OrderID::text AS "OrderID", Status AS "Status", PaymentStatus AS "PaymentStatus";
         """, (new_payment_status, order_id))
         canceled_order = cursor.fetchone()
 
-        # TỐI ƯU 4: UPDATE hoàn kho chỉ với 1 câu lệnh SQL duy nhất (Thay thế vòng lặp Python)
         cursor.execute("""
             UPDATE Products p
             SET StockQuantity = p.StockQuantity + od.Quantity,
                 SoldQuantity = GREATEST(p.SoldQuantity - od.Quantity, 0)
             FROM OrderDetails od
-            WHERE p.ProductID = od.ProductID AND od.OrderID = %s;
+            WHERE p.ProductID = od.ProductID AND od.OrderID = %s::uuid;
         """, (order_id,))
 
         conn.commit()
@@ -290,7 +289,7 @@ def get_order_payment_status(order_id, user_id, role_name):
         cursor.execute("""
             SELECT o.OrderID::text AS "OrderID", o.UserID::text AS userid, o.PaymentStatus AS "PaymentStatus", 
                    o.TotalAmount AS "TotalAmount", s.ManagerID::text AS managerid
-            FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s;
+            FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s::uuid;
         """, (order_id,))
         order = cursor.fetchone()
         
@@ -317,7 +316,7 @@ def confirm_mock_payment(order_id, user_id, role_name):
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute("""
             SELECT o.PaymentStatus AS paymentstatus, s.ManagerID::text AS managerid 
-            FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s FOR UPDATE;
+            FROM Orders o JOIN Shops s ON o.ShopID = s.ShopID WHERE o.OrderID = %s::uuid FOR UPDATE;
         """, (order_id,))
         order = cursor.fetchone()
         
@@ -337,7 +336,7 @@ def confirm_mock_payment(order_id, user_id, role_name):
             return False, "Đơn hàng này đã được thanh toán từ trước", None
 
         cursor.execute("""
-            UPDATE Orders SET PaymentStatus = 'Đã thanh toán', UpdatedAt = CURRENT_TIMESTAMP WHERE OrderID = %s
+            UPDATE Orders SET PaymentStatus = 'Đã thanh toán', UpdatedAt = CURRENT_TIMESTAMP WHERE OrderID = %s::uuid
             RETURNING OrderID::text AS "OrderID", PaymentStatus AS "PaymentStatus", Status AS "Status", TotalAmount AS "TotalAmount";
         """, (order_id,))
         updated_order = cursor.fetchone()
